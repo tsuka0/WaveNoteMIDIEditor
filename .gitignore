@@ -11,7 +11,7 @@ __pycache__/
 *.so
 
 #exe(add by tk)
-.exe
+*.exe
 
 # Distribution / packaging
 .Python
