@@ -21,6 +21,7 @@ dist/
 downloads/
 main.dist/
 main.build/
+main.onefile-build/
 eggs/
 .eggs/
 lib/
