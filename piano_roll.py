@@ -744,9 +744,13 @@ class PianoRoll(QWidget):
             return
 
         if event.key() == Qt.Key_A and event.modifiers() & Qt.ControlModifier:
-            track_index = self.midi.active_track()
-            notes = self.midi.tracks[track_index].notes
-            self.selected_notes = list(notes)
+            if self.midi.filter_track is not None:
+                track_index = self.midi.filter_track
+                self.selected_notes = list(self.midi.tracks[track_index].notes)
+            else:
+                self.selected_notes = []
+                for track in self.midi.tracks:
+                    self.selected_notes.extend(track.notes)
             self.update()
             event.accept()
             return
@@ -1208,24 +1212,24 @@ class PianoRoll(QWidget):
                 note_end_x
             ) <= 8:
                 self.drag_mode = "resize"
-                self.drag_original_notes = None
             else:
                 self.drag_mode = "move"
 
-                if (
-                    note in self.selected_notes and
-                    len(self.selected_notes) > 1
-                ):
-                    self.drag_original_notes = [
-                        (
-                            n,
-                            n.start,
-                            n.pitch
-                        )
-                        for n in self.selected_notes
-                    ]
-                else:
-                    self.drag_original_notes = None
+            if (
+                note in self.selected_notes and
+                len(self.selected_notes) > 1
+            ):
+                self.drag_original_notes = [
+                    (
+                        n,
+                        n.start,
+                        n.pitch,
+                        n.duration
+                    )
+                    for n in self.selected_notes
+                ]
+            else:
+                self.drag_original_notes = None
 
             if note not in self.selected_notes:
                 self.selected_notes = [
@@ -1684,7 +1688,7 @@ class PianoRoll(QWidget):
                 time_diff = new_start - original_start
                 pitch_diff = new_pitch - original_pitch
 
-                for n, o_start, o_pitch in (
+                for n, o_start, o_pitch, o_duration in (
                     self.drag_original_notes
                 ):
                     n.start = max(
@@ -1727,17 +1731,33 @@ class PianoRoll(QWidget):
                 self.seconds_per_pixel
             )
 
-            self.drag_note.duration = max(
-                (
-                    self.midi.beat_to_time(
-                        self.midi.beat_phase + 0.25
-                    ) -
-                    self.midi.beat_to_time(
-                        self.midi.beat_phase
+            diff_duration = new_duration - original_duration
+
+            if self.drag_original_notes:
+                for n, o_start, o_pitch, o_duration in self.drag_original_notes:
+                    n.duration = max(
+                        (
+                            self.midi.beat_to_time(
+                                self.midi.beat_phase + 0.25
+                            ) -
+                            self.midi.beat_to_time(
+                                self.midi.beat_phase
+                            )
+                        ),
+                        o_duration + diff_duration
                     )
-                ),
-                new_duration
-            )
+            else:
+                self.drag_note.duration = max(
+                    (
+                        self.midi.beat_to_time(
+                            self.midi.beat_phase + 0.25
+                        ) -
+                        self.midi.beat_to_time(
+                            self.midi.beat_phase
+                        )
+                    ),
+                    new_duration
+                )
 
         self.update()
 
@@ -2906,8 +2926,8 @@ class PianoRoll(QWidget):
             g <
             self.spectrum_threshold,
             0.0,
-            55.0 +
-            g * 145.0
+            25.0 +
+            g * 85.0
         )
 
         img = np.empty(
@@ -3442,8 +3462,8 @@ class PianoRoll(QWidget):
                 sel_brush = QBrush(
                     QColor(
                         255,
-                        190,
-                        55,
+                        255,
+                        255,
                         240
                     )
                 )
@@ -3451,11 +3471,11 @@ class PianoRoll(QWidget):
                 sel_pen = QPen(
                     QColor(
                         255,
-                        245,
-                        180,
+                        255,
+                        255,
                         255
                     ),
-                    1
+                    2
                 )
 
                 self._note_pens[track_index] = (

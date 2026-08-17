@@ -1,4 +1,5 @@
 import os
+import time
 import sys
 import threading
 import json
@@ -10,6 +11,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QLabel,
     QCheckBox,
+    QProgressDialog,
     QSpinBox,
     QDoubleSpinBox,
     QSlider,
@@ -18,7 +20,6 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QVBoxLayout,
-    QHBoxLayout,
     QFormLayout
 )
 from PySide6.QtGui import QAction, QKeySequence
@@ -315,100 +316,37 @@ class MainWindow(QMainWindow):
             "ファイル"
         )
 
-        open_audio_action = QAction(
-            "オーディオを開く",
-            self
-        )
-        open_audio_action.triggered.connect(
-            self.open_audio
-        )
+        new_project_action = QAction("プロジェクトを新規作成", self)
+        new_project_action.setShortcut(QKeySequence.StandardKey.New)
+        new_project_action.triggered.connect(self.new_project)
 
-        open_midi_action = QAction(
-            "MIDIを開く",
-            self
-        )
-        open_midi_action.triggered.connect(
-            self.open_midi
-        )
+        load_project_action = QAction("プロジェクトを開く", self)
+        load_project_action.setShortcut(QKeySequence.StandardKey.Open)
+        load_project_action.triggered.connect(self.open_project)
 
-        new_midi_action = QAction(
-            "MIDIを新規作成",
-            self
-        )
-        new_midi_action.setShortcut(
-            QKeySequence.StandardKey.New
-        )
-        new_midi_action.triggered.connect(
-            self.new_midi
-        )
+        save_project_action = QAction("プロジェクトを保存", self)
+        save_project_action.setShortcut(QKeySequence.StandardKey.Save)
+        save_project_action.triggered.connect(self.save_project)
 
-        save_project_action = QAction(
-            "プロジェクトを保存",
-            self
-        )
-        save_project_action.setShortcut(
-            QKeySequence.StandardKey.Save
-        )
-        save_project_action.triggered.connect(
-            self.save_project
-        )
+        open_midi_action = QAction("MIDIを開く", self)
+        open_midi_action.triggered.connect(self.open_midi)
 
-        load_project_action = QAction(
-            "プロジェクトを開く",
-            self
-        )
-        load_project_action.triggered.connect(
-            self.open_project
-        )
+        open_audio_action = QAction("オーディオを開く", self)
+        open_audio_action.triggered.connect(self.open_audio)
 
-        clear_audio_action = QAction(
-            "音楽を空にする",
-            self
-        )
-        clear_audio_action.triggered.connect(
-            self.clear_audio
-        )
+        save_action = QAction("MIDIを保存", self)
+        save_action.triggered.connect(self.save_midi)
 
-        save_action = QAction(
-            "MIDIを保存",
-            self
-        )
-        save_action.triggered.connect(
-            self.save_midi
-        )
-        # Keep common project and source-file actions in workflow order.
-        file_menu.addAction(
-            load_project_action
-        )
-        file_menu.addAction(
-            save_project_action
-        )
-        file_menu.addAction(
-            open_midi_action
-        )
-        file_menu.addAction(
-            new_midi_action
-        )
-        file_menu.addAction(
-            open_audio_action
-        )
-        file_menu.addAction(
-            clear_audio_action
-        )
-        file_menu.addAction(
-            save_action
-        )
+        exit_action = QAction("終了", self)
+        exit_action.triggered.connect(self.close)
 
-        exit_action = QAction(
-            "終了",
-            self
-        )
-        exit_action.triggered.connect(
-            self.close
-        )
-        file_menu.addAction(
-            exit_action
-        )
+        file_menu.addAction(new_project_action)
+        file_menu.addAction(load_project_action)
+        file_menu.addAction(save_project_action)
+        file_menu.addAction(open_midi_action)
+        file_menu.addAction(open_audio_action)
+        file_menu.addAction(save_action)
+        file_menu.addAction(exit_action)
 
         edit_menu = self.menuBar().addMenu(
             "編集"
@@ -1021,6 +959,33 @@ class MainWindow(QMainWindow):
         if self.windowTitle() != title:
             self.setWindowTitle(title)
 
+    def new_project(self):
+        if self.project_is_modified():
+            answer = QMessageBox.question(
+                self,
+                "未保存の変更",
+                "現在のプロジェクトに変更があります。\n保存しますか？",
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel
+            )
+
+            if answer == QMessageBox.Cancel:
+                return
+
+            if answer == QMessageBox.Yes:
+                if not self.save_project():
+                    return
+
+        self.audio.stop()
+        self.midi = MidiData()
+        self.audio.clear()
+        self.editor.set_midi(self.midi)
+        self.editor.clear_audio()
+        self.refresh_track_combo()
+        self._project_path = None
+        self._mark_project_saved()
+        self.editor.update_timeline()
+        self.editor.update()
+
     def _save_project_to_path(self, path):
         try:
             with open(path, "w", encoding="utf-8") as f:
@@ -1214,11 +1179,24 @@ class MainWindow(QMainWindow):
                         self._analysis_error = e
                         self._analysis_ready = True
 
+            progress = QProgressDialog("オーディオとスペクトラムを解析中...", "キャンセル", 0, 0, self)
+            progress.setWindowTitle("プロジェクトを開く")
+            progress.setWindowModality(Qt.WindowModal)
+            progress.setCancelButton(None)
+            progress.show()
+
             thread = threading.Thread(
                 target=worker,
                 daemon=True
             )
             thread.start()
+
+            while not self._analysis_ready and thread.is_alive():
+                QApplication.processEvents()
+                time.sleep(0.01)
+                
+            progress.close()
+            self.update_editor()
         else:
             self.audio.clear()
             self.editor.clear_audio()
@@ -1453,12 +1431,25 @@ class MainWindow(QMainWindow):
                         self._analysis_error = e
                         self._analysis_ready = True
 
+            progress = QProgressDialog("オーディオとスペクトラムを解析中...", "キャンセル", 0, 0, self)
+            progress.setWindowTitle("オーディオを開く")
+            progress.setWindowModality(Qt.WindowModal)
+            progress.setCancelButton(None)
+            progress.show()
+
             thread = threading.Thread(
                 target=worker,
                 daemon=True
             )
             thread.start()
 
+            while not self._analysis_ready and thread.is_alive():
+                QApplication.processEvents()
+                time.sleep(0.01)
+
+            progress.close()
+            self.update_title()
+            self.update_editor()
             self.editor.set_play_position(0.0)
             self.editor.scroll_x = 0.0
             self.editor.update_timeline()
