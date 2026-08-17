@@ -1,3 +1,4 @@
+import os
 import sys
 import threading
 import json
@@ -131,10 +132,11 @@ class SettingsDialog(QDialog):
         return self._device_combo.currentData()
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, initial_file=None):
         super().__init__()
         self.setWindowTitle("WaveNoteMIDIEditor")
         self.showMaximized()
+        self.setAcceptDrops(True)
 
         self.audio = AudioData()
         self.spectrum = SpectrumData()
@@ -217,6 +219,71 @@ class MainWindow(QMainWindow):
         self._saved_project_state = None
 
         self._mark_project_saved()
+
+        if initial_file:
+            self.open_file_by_path(initial_file)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        urls = event.mimeData().urls()
+        if urls:
+            path = urls[0].toLocalFile()
+            if path:
+                if self.project_is_modified():
+                    answer = QMessageBox.question(
+                        self,
+                        "プロジェクトを保存",
+                        "現在のプロジェクトに未保存の変更があります。保存しますか？",
+                        QMessageBox.Yes |
+                        QMessageBox.No |
+                        QMessageBox.Cancel,
+                        QMessageBox.Yes
+                    )
+                    if answer == QMessageBox.Cancel:
+                        return
+                    if answer == QMessageBox.Yes:
+                        if not self.save_project():
+                            return
+                self.open_file_by_path(path)
+
+    def open_file_by_path(self, path):
+        if not path:
+            return
+        path = str(path).strip().strip('"').strip("'")
+        if not os.path.exists(path):
+            QMessageBox.critical(
+                self,
+                "エラー",
+                f"ファイルが見つかりません:\n{path}"
+            )
+            return
+
+        ext = Path(path).suffix.lower()
+        if ext == ".wnp":
+            self.load_project(path)
+        elif ext in (".mid", ".midi"):
+            self.load_midi_file(path)
+        elif ext in (".wav", ".mp3", ".flac", ".ogg", ".m4a"):
+            self.load_audio_file(path)
+        else:
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict) and ("midi_tracks" in data or "audio_file" in data):
+                    self.load_project(path)
+                    return
+            except Exception:
+                pass
+            QMessageBox.warning(
+                self,
+                "未対応の形式",
+                f"サポートされていないファイル形式です:\n{path}"
+            )
 
     def closeEvent(self, event):
         if self.project_is_modified():
@@ -997,20 +1064,40 @@ class MainWindow(QMainWindow):
         return self._save_project_to_path(path)
 
     def load_project(self, path):
-        import json
-        import os
-
+        path = str(path).strip().strip('"').strip("'")
         if not os.path.exists(path):
+            QMessageBox.critical(
+                self,
+                "エラー",
+                f"プロジェクトファイルが見つかりません:\n{path}"
+            )
             return
 
-        with open(path, "r", encoding="utf-8") as f:
-            project = json.load(f)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                project = json.load(f)
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "エラー",
+                f"プロジェクトの読み込みに失敗しました:\n{e}"
+            )
+            return
 
         # MIDIトラックの再構築
         self.midi = MidiData()
         self.midi.tracks.clear()
-        self.midi.tempos = project.get("midi_tempos", [(0.0, 120.0)])
-        self.midi.time_signatures = project.get("midi_timesigs", [(0.0, 4, 4)])
+        raw_tempos = project.get("midi_tempos", [(0.0, 120.0)])
+        self.midi.tempos = [
+            (float(t[0]), float(t[1])) for t in raw_tempos
+        ] if raw_tempos else [(0.0, 120.0)]
+        self.midi.bpm = float(self.midi.tempos[0][1])
+
+        raw_timesigs = project.get("midi_timesigs", [(0.0, 4, 4)])
+        self.midi.time_signatures = [
+            (float(ts[0]), int(ts[1]), int(ts[2])) for ts in raw_timesigs
+        ] if raw_timesigs else [(0.0, 4, 4)]
+        self.midi.has_file = bool(project.get("midi_tracks"))
 
         # トラックの再構築
         for track_data in project.get("midi_tracks", []):
@@ -1052,9 +1139,45 @@ class MainWindow(QMainWindow):
         self.editor.set_midi(self.midi)
         self.audio.set_midi(self.midi)
 
-        # 音声ファイルの読み込みとスペクトラム解析（非同期）
+        # ツールバーUIの同期
+        self.tempo_box.blockSignals(True)
+        self.tempo_box.setValue(int(round(self.midi.bpm)))
+        self.tempo_box.blockSignals(False)
+
+        num, den = self.midi.time_sig_at(0.0)
+        self.num_box.blockSignals(True)
+        self.num_box.setValue(num)
+        self.num_box.blockSignals(False)
+
+        self.den_box.blockSignals(True)
+        self.den_box.setValue(den)
+        self.den_box.blockSignals(False)
+
+        self.offset_box.blockSignals(True)
+        self.offset_box.setValue(project_audio_offset)
+        self.offset_box.blockSignals(False)
+
+        self.volume_slider.blockSignals(True)
+        self.volume_slider.setValue(int(project_audio_volume * 100))
+        self.volume_slider.blockSignals(False)
+
+        # 音声ファイルの解決とスペクトラム解析（非同期）
         audio_file = project.get("audio_file")
-        if audio_file and os.path.exists(audio_file):
+        resolved_audio_file = None
+        if audio_file:
+            if os.path.exists(audio_file):
+                resolved_audio_file = os.path.abspath(audio_file)
+            else:
+                proj_dir = Path(path).resolve().parent
+                cand1 = proj_dir / audio_file
+                if cand1.exists():
+                    resolved_audio_file = str(cand1.resolve())
+                else:
+                    cand2 = proj_dir / Path(audio_file).name
+                    if cand2.exists():
+                        resolved_audio_file = str(cand2.resolve())
+
+        if resolved_audio_file:
             self._analysis_token += 1
             token = self._analysis_token
             self._analysis_ready = False
@@ -1065,14 +1188,14 @@ class MainWindow(QMainWindow):
             self.audio.clear()
             self.audio.offset = project_audio_offset
             self.audio.volume = project_audio_volume
-            self.audio.file_path = audio_file
+            self.audio.file_path = resolved_audio_file
             self.editor.clear_audio()
             self.editor._spectrum_image = None
             self.editor._spectrum_key = None
 
             def worker():
                 try:
-                    duration = self.audio.load(audio_file)
+                    duration = self.audio.load(resolved_audio_file)
                     if token != self._analysis_token:
                         return
 
@@ -1097,7 +1220,16 @@ class MainWindow(QMainWindow):
             )
             thread.start()
         else:
+            self.audio.clear()
+            self.editor.clear_audio()
             self.editor.update_timeline()
+            if audio_file:
+                QMessageBox.warning(
+                    self,
+                    "音声ファイルが見つかりません",
+                    f"プロジェクトに登録されている音声ファイルが見つかりませんでした:\n{audio_file}"
+                )
+
         self.refresh_track_combo()
         self.editor.set_track_filter(self.midi.filter_track)
         self.editor.set_play_position(0.0)
@@ -1258,7 +1390,17 @@ class MainWindow(QMainWindow):
             "Audio Files (*.wav *.mp3 *.flac *.ogg *.m4a);;All Files (*)"
         )
 
-        if not path:
+        if path:
+            self.load_audio_file(path)
+
+    def load_audio_file(self, path):
+        path = str(path).strip().strip('"').strip("'")
+        if not os.path.exists(path):
+            QMessageBox.critical(
+                self,
+                "エラー",
+                f"音声ファイルが見つかりません:\n{path}"
+            )
             return
 
         try:
@@ -1350,7 +1492,17 @@ class MainWindow(QMainWindow):
             "MIDI Files (*.mid *.midi)"
         )
 
-        if not path:
+        if path:
+            self.load_midi_file(path)
+
+    def load_midi_file(self, path):
+        path = str(path).strip().strip('"').strip("'")
+        if not os.path.exists(path):
+            QMessageBox.critical(
+                self,
+                "エラー",
+                f"MIDIファイルが見つかりません:\n{path}"
+            )
             return
 
         try:
@@ -1500,7 +1652,8 @@ if __name__ == "__main__":
         "Fusion"
     )
 
-    window = MainWindow()
+    initial_file = sys.argv[1] if len(sys.argv) > 1 else None
+    window = MainWindow(initial_file=initial_file)
     window.show()
 
     sys.exit(
