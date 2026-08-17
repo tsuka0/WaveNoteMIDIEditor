@@ -251,11 +251,17 @@ class PianoRoll(QWidget):
         self,
         value
     ):
-        beats = (
-            self.placement_beats
-            if self.placement_beats is not None
-            else self.note_length
-        )
+        if self.selected_notes:
+            beats = min(
+                note.duration * (self.midi.tempo_at(note.start) / 60.0)
+                for note in self.selected_notes
+            )
+        else:
+            beats = (
+                self.placement_beats
+                if self.placement_beats is not None
+                else self.note_length
+            )
 
         grid = max(
             0.25,
@@ -1660,60 +1666,40 @@ class PianoRoll(QWidget):
             ):
                 self.press_moved = True
 
-            if self.drag_original_notes:
-                grid_note = (
-                    self.drag_original_notes[0][0]
-                )
+            new_start = self.snap_time(
+                original_start +
+                dx *
+                self.seconds_per_pixel
+            )
 
-                grid = self.note_grid_beats(
-                    grid_note
+            new_pitch = (
+                original_pitch -
+                round(
+                    dy /
+                    self.note_height
                 )
+            )
+
+            if self.drag_original_notes:
+                time_diff = new_start - original_start
+                pitch_diff = new_pitch - original_pitch
 
                 for n, o_start, o_pitch in (
                     self.drag_original_notes
                 ):
-                    new_start = self.snap_time(
-                        o_start +
-                        dx *
-                        self.seconds_per_pixel,
-                        grid
-                    )
-
-                    new_pitch = (
-                        o_pitch -
-                        round(
-                            dy /
-                            self.note_height
-                        )
-                    )
-
                     n.start = max(
                         0.0,
-                        new_start
+                        o_start + time_diff
                     )
 
                     n.pitch = max(
                         self.min_pitch,
                         min(
                             self.max_pitch,
-                            new_pitch
+                            o_pitch + pitch_diff
                         )
                     )
             else:
-                new_start = self.snap_time(
-                    original_start +
-                    dx *
-                    self.seconds_per_pixel
-                )
-
-                new_pitch = (
-                    original_pitch -
-                    round(
-                        dy /
-                        self.note_height
-                    )
-                )
-
                 self.drag_note.start = max(
                     0.0,
                     new_start
