@@ -76,6 +76,7 @@ class PianoRoll(QWidget):
 
         self.spectrum_db_range = 50.0
         self.spectrum_threshold = 0.35
+        self.return_to_start_on_stop = True
 
         self.track_colors = [
             (55, 185, 240),
@@ -481,7 +482,10 @@ class PianoRoll(QWidget):
 
     def toggle_play(self):
         if self.audio.playing:
-            self.pause()
+            if getattr(self, "return_to_start_on_stop", True):
+                self.stop()
+            else:
+                self.pause()
         else:
             self.play()
 
@@ -491,6 +495,12 @@ class PianoRoll(QWidget):
 
     def pause(self):
         self.audio.pause()
+
+        self.set_play_position(
+            self.audio.position
+        )
+
+        self.update()
 
     def stop(self):
         self.audio.stop()

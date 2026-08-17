@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QMessageBox,
     QLabel,
+    QCheckBox,
     QSpinBox,
     QDoubleSpinBox,
     QSlider,
@@ -151,6 +152,40 @@ class MainWindow(QMainWindow):
             self.spectrum,
             self.midi
         )
+
+        saved_return = load_value(
+            "return_to_start_on_stop",
+            "1"
+        )
+        self.editor.return_to_start_on_stop = (
+            str(saved_return).lower() in ("1", "true", "yes", "on")
+        )
+
+        saved_threshold = load_value(
+            "spectrum_threshold",
+            None
+        )
+        if saved_threshold is not None:
+            try:
+                thresh_val = int(float(saved_threshold))
+                thresh_val = max(0, min(40, thresh_val))
+                self.editor.spectrum_threshold = (
+                    thresh_val / 100.0
+                )
+            except (ValueError, TypeError):
+                pass
+
+        saved_sensitivity = load_value(
+            "spectrum_sensitivity",
+            None
+        )
+        if saved_sensitivity is not None:
+            try:
+                sens_val = float(saved_sensitivity)
+                sens_val = max(10.0, min(100.0, sens_val))
+                self.editor.spectrum_db_range = sens_val
+            except (ValueError, TypeError):
+                pass
 
         self.setCentralWidget(self.editor)
 
@@ -558,6 +593,20 @@ class MainWindow(QMainWindow):
             self.length_combo
         )
 
+        self.return_to_start_checkbox = QCheckBox(
+            "  停止時に開始位置へ戻る"
+        )
+        self.return_to_start_checkbox.setChecked(
+            self.editor.return_to_start_on_stop
+        )
+        self.return_to_start_checkbox.toggled.connect(
+            self.change_return_to_start
+        )
+
+        toolbar.addWidget(
+            self.return_to_start_checkbox
+        )
+
         offset_label = QLabel(
             "  音声オフセット "
         )
@@ -792,6 +841,13 @@ class MainWindow(QMainWindow):
             self.track_combo.currentIndex()
         )
 
+    def change_return_to_start(self, checked):
+        self.editor.return_to_start_on_stop = checked
+        save_value(
+            "return_to_start_on_stop",
+            "1" if checked else "0"
+        )
+
     def change_offset(self, value):
         self.audio.offset = value
         self.editor.update()
@@ -804,6 +860,11 @@ class MainWindow(QMainWindow):
 
         self.editor.update()
 
+        save_value(
+            "spectrum_threshold",
+            str(value)
+        )
+
     def change_volume(self, value):
         self.audio.volume = (
             value /
@@ -815,6 +876,11 @@ class MainWindow(QMainWindow):
         self.editor._spectrum_key = None
         self.editor._spectrum_image = None
         self.editor.update()
+
+        save_value(
+            "spectrum_sensitivity",
+            str(value)
+        )
 
     def _project_data(self):
         project = {
