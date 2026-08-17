@@ -63,6 +63,7 @@ class AudioData:
 
         self.file_path = None
         self._midi_cache_dirty = False
+        self._midi_cache_version = 0
 
     def set_midi(self, midi):
         self.midi = midi
@@ -248,6 +249,7 @@ class AudioData:
             default=0.0
         )
 
+        self._midi_cache_version += 1
         self._midi_cache_dirty = False
 
     def _play_with_midi(self, start_position, gen):
@@ -318,6 +320,7 @@ class AudioData:
             midi_worker.start()
 
         sample_position = 0
+        local_version = self._midi_cache_version
 
         try:
             stream.start()
@@ -326,8 +329,10 @@ class AudioData:
                 self.playing and
                 sample_position < total_samples
             ):
-                if self._midi_cache_dirty:
-                    self._refresh_midi_cache()
+                if self._midi_cache_dirty or local_version != self._midi_cache_version:
+                    if self._midi_cache_dirty:
+                        self._refresh_midi_cache()
+                    local_version = self._midi_cache_version
 
                 current_time = (
                     start_position +
@@ -556,6 +561,7 @@ class AudioData:
             )
 
             index = 0
+            local_version = self._midi_cache_version
 
             while True:
                 if (
@@ -564,7 +570,7 @@ class AudioData:
                 ):
                     return
 
-                if self._midi_cache_dirty:
+                if self._midi_cache_dirty or local_version != self._midi_cache_version:
                     now = time.perf_counter()
 
                     elapsed = now - wall_base
@@ -579,7 +585,10 @@ class AudioData:
 
                         song_base = new_song
 
-                    self._refresh_midi_cache()
+                    if self._midi_cache_dirty:
+                        self._refresh_midi_cache()
+                    
+                    local_version = self._midi_cache_version
 
                     device = self._midi_out
 
@@ -602,7 +611,8 @@ class AudioData:
                     continue
 
                 if index >= len(events):
-                    return
+                    time.sleep(0.005)
+                    continue
 
                 relative, kind, pitch, velocity, channel = events[index]
 
