@@ -66,7 +66,8 @@ MIDIファイルを読み込んだ後は、そのMIDIに含まれるテンポ情
 | 操作 | 内容 |
 | --- | --- |
 | `Space` | 再生 / 一時停止 |
-| `Shift` + `Space` | 停止 |
+| `Shift` + `Space` | テンポ計測(精度低) |
+| `Ctrl` + `S` | プロジェクト保存 |
 | `Ctrl` + `N` | 新規MIDI |
 | `Ctrl` + `Z` / `Ctrl` + `Y` | 元に戻す / やり直し |
 | `Ctrl` + `C` / `Ctrl` + `X` / `Ctrl` + `V` | ノートのコピー / 切り取り / 貼り付け |
@@ -106,5 +107,5 @@ MIDIファイルを読み込んだ後は、そのMIDIに含まれるテンポ情
 
 ## プロジェクトのexe化コマンド
 ```
-python -m nuitka --mode=onefile --windows-console-mode=disable --enable-plugin=pyside6 --windows-icon-from-ico=Assets\icon.ico --output-filename=MyApp.exe main.py
+python -m PyInstaller --onefile --windowed --icon=Assets\icon.ico main.py
 ```

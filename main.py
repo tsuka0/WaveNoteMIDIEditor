@@ -245,7 +245,7 @@ class MainWindow(QMainWindow):
             self
         )
         save_project_action.setShortcut(
-            QKeySequence("Shift+S")
+            QKeySequence.StandardKey.Save
         )
         save_project_action.triggered.connect(
             self.save_project
@@ -817,55 +817,6 @@ class MainWindow(QMainWindow):
         self.editor.update()
 
     def _project_data(self):
-        import json
-        from PySide6.QtWidgets import QFileDialog
-
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "プロジェクトを保存",
-            "",
-            "WaveNote Project (*.wnp);;All Files (*)"
-        )
-        if not path:
-            return
-
-        project = {
-            "midi_tracks": [],
-            "midi_filter_track": self.midi.filter_track,
-            "midi_tempos": self.midi.tempos,
-            "midi_timesigs": self.midi.time_signatures,
-            "audio_offset": self.audio.offset,
-            "audio_volume": self.audio.volume,
-            "audio_file": self.audio.file_path,
-        }
-
-        for track in self.midi.tracks:
-            track_data = []
-            for note in track.notes:
-                track_data.append({
-                    "start": note.start,
-                    "duration": note.duration,
-                    "pitch": note.pitch,
-                    "velocity": note.velocity,
-                    "channel": getattr(note, 'channel', track.channel)
-                })
-            project["midi_tracks"].append({
-                "name": track.name,
-                "channel": track.channel,
-                "notes": track_data,
-                "pedals": [
-                    {
-                        "time": pedal.time,
-                        "down": pedal.down
-                    }
-                    for pedal in track.pedals
-                ]
-            })
-
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(project, f, indent=2, ensure_ascii=False)
-
-    def _project_data(self):
         project = {
             "midi_tracks": [],
             "midi_filter_track": self.midi.filter_track,
@@ -911,12 +862,31 @@ class MainWindow(QMainWindow):
 
     def _mark_project_saved(self):
         self._saved_project_state = self._project_state()
+        self.update_title()
 
     def project_is_modified(self):
         return (
             self._saved_project_state is not None and
             self._project_state() != self._saved_project_state
         )
+
+    def update_title(self):
+        if self._project_path:
+            name = Path(self._project_path).name
+            base = f"WaveNoteMIDIEditor - {name}"
+        elif self.audio.file_path:
+            name = Path(self.audio.file_path).name
+            base = f"WaveNoteMIDIEditor - {name}"
+        else:
+            base = "WaveNoteMIDIEditor"
+
+        if self.project_is_modified():
+            title = f"{base} *"
+        else:
+            title = base
+
+        if self.windowTitle() != title:
+            self.setWindowTitle(title)
 
     def _save_project_to_path(self, path):
         try:
@@ -1161,6 +1131,7 @@ class MainWindow(QMainWindow):
         self._analysis_token += 1
         self._analysis_ready = False
         self._analysis_error = None
+        self._project_path = None
 
         self.midi = MidiData()
 
@@ -1196,9 +1167,7 @@ class MainWindow(QMainWindow):
             0
         )
 
-        self.setWindowTitle(
-            "WaveNoteMIDIEditor"
-        )
+        self._mark_project_saved()
 
     def clear_audio(self):
         self._analysis_token += 1
@@ -1213,9 +1182,7 @@ class MainWindow(QMainWindow):
         self.offset_box.setValue(0.0)
         self.offset_box.blockSignals(False)
 
-        self.setWindowTitle(
-            "WaveNoteMIDIEditor"
-        )
+        self.update_title()
 
     def open_audio(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1296,9 +1263,7 @@ class MainWindow(QMainWindow):
                 str(e)
             )
 
-        self.setWindowTitle(
-            f"WaveNoteMIDIEditor - {Path(path).name}"
-        )
+        self.update_title()
 
     def open_project(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1364,6 +1329,8 @@ class MainWindow(QMainWindow):
             self.editor.scroll_x = 0.0
             self.editor.update_timeline()
             self.editor.update()
+            self._project_path = None
+            self.update_title()
 
         except Exception as e:
             QMessageBox.critical(
@@ -1395,6 +1362,7 @@ class MainWindow(QMainWindow):
             )
 
     def update_editor(self):
+        self.update_title()
         self.audio.update_position()
 
         if self._pending_audio_duration is not None:

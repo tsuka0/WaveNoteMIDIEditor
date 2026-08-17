@@ -14,8 +14,10 @@ __pycache__/
 *.exe
 
 # Distribution / packaging
+*.iss
 .Python
 build/
+installer/
 develop-eggs/
 dist/
 downloads/
