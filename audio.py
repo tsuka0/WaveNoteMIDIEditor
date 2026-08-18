@@ -74,10 +74,13 @@ class AudioData:
 
     def set_output_device(self, device):
         with self._midi_lock:
+            if self.output_device == device:
+                return
+                
             self.output_device = device
+            self._close_midi_out()
 
             if device == "internal":
-                self._close_midi_out()
                 return
 
             if not self._open_midi_out():
@@ -184,6 +187,7 @@ class AudioData:
 
         self.playing = True
         self.paused = False
+        self.auto_stopped = False
 
         self._silence_preview()
 
@@ -416,6 +420,7 @@ class AudioData:
             if gen == self._play_gen:
                 if sample_position >= total_samples:
                     self.position = self.max_position()
+                    self.auto_stopped = True
 
                 self.playing = False
 
@@ -517,8 +522,10 @@ class AudioData:
                 if pedal.time >= total_time:
                     continue
 
+                delay = 0.01 if pedal.down else 0.0
+                
                 events.append((
-                    pedal.time - start_position,
+                    pedal.time - start_position + delay,
                     "pedal",
                     pedal.down,
                     0,

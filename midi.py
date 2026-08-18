@@ -103,7 +103,7 @@ class MidiData:
                     )
                     for pedal in track.pedals
                 ],
-                channel=track.get('channel', 0)
+                channel=getattr(track, 'channel', 0)
             )
             for track in snap["tracks"]
         ]
@@ -263,6 +263,8 @@ class MidiData:
         events.sort(key=lambda e: e.time)
 
         self._bump()
+        if self.filter_track is None and track_index == 0:
+            self.sync_pedals(0)
 
         return ev
 
@@ -273,9 +275,14 @@ class MidiData:
 
         for ev in events:
             if abs(ev.time - time) < 1e-6:
-                ev.down = not ev.down
+                if ev.down:
+                    ev.down = False
+                else:
+                    events.remove(ev)
                 self._bump()
-                return ev
+                if self.filter_track is None and track_index == 0:
+                    self.sync_pedals(0)
+                return ev if ev.down else None
 
         down = not self.pedal_state_at(
             track_index,
@@ -288,6 +295,8 @@ class MidiData:
         events.sort(key=lambda e: e.time)
 
         self._bump()
+        if self.filter_track is None and track_index == 0:
+            self.sync_pedals(0)
 
         return ev
 
@@ -309,12 +318,15 @@ class MidiData:
         )
 
         if other is not None:
-            events.remove(event)
+            # 重複配置できないように移動をキャンセル
+            return
         else:
             event.time = time
             events.sort(key=lambda e: e.time)
 
         self._bump()
+        if self.filter_track is None and track_index == 0:
+            self.sync_pedals(0)
 
     def remove_pedal(self, track_index, time):
         events = self.tracks[track_index].pedals
@@ -330,8 +342,18 @@ class MidiData:
 
         if removed:
             self._bump()
+            if self.filter_track is None and track_index == 0:
+                self.sync_pedals(0)
 
         return bool(removed)
+
+    def sync_pedals(self, source_track_index):
+        source_pedals = self.tracks[source_track_index].pedals
+        for i, track in enumerate(self.tracks):
+            if i == source_track_index:
+                continue
+            track.pedals = [PedalEvent(ev.time, ev.down) for ev in source_pedals]
+        self._bump()
 
     def _sustain_extended_notes(self, notes, pairs):
         if not pairs:
@@ -430,6 +452,9 @@ class MidiData:
         track = Track(
             name or f"トラック {len(self.tracks) + 1}"
         )
+
+        if self.filter_track is None and self.tracks:
+            track.pedals = [PedalEvent(ev.time, ev.down) for ev in self.tracks[0].pedals]
 
         self.tracks.append(track)
 
@@ -754,6 +779,14 @@ class MidiData:
         track = self.tracks[track_idx]
         note = Note(start, duration, pitch, velocity, track.channel)
 
+        # 重複チェック: 同じピッチで時間が被るノーツがあれば追加しない
+        new_end = note.start + note.duration
+        for n in track.notes:
+            if n.pitch == note.pitch:
+                n_end = n.start + n.duration
+                if not (new_end <= n.start + 1e-6 or note.start >= n_end - 1e-6):
+                    return None
+
         track.notes.append(note)
 
         self.sort()
@@ -807,8 +840,18 @@ class MidiData:
                 getattr(note, 'channel', track.channel)
             )
 
-            track.notes.append(new_note)
-            created.append(new_note)
+            is_duplicate = False
+            new_end = new_note.start + new_note.duration
+            for n in track.notes:
+                if n.pitch == new_note.pitch:
+                    n_end = n.start + n.duration
+                    if not (new_end <= n.start + 1e-6 or new_note.start >= n_end - 1e-6):
+                        is_duplicate = True
+                        break
+            
+            if not is_duplicate:
+                track.notes.append(new_note)
+                created.append(new_note)
 
         self.sort()
         self._bump()
@@ -940,6 +983,9 @@ class MidiData:
                         )
                     )
                 )
+                
+                if pedal.down:
+                    tick += 1
 
                 events.append(
                     (tick, 2, pedal.down)

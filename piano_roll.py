@@ -334,6 +334,14 @@ class PianoRoll(QWidget):
             self.left_width
         ) * self.seconds_per_pixel
 
+        current_right_edge = self.scroll_x + visible_time
+
+        if not getattr(self, "_is_following_center", False) and not force:
+            if self.play_position >= current_right_edge:
+                self._is_following_center = True
+            else:
+                return
+
         target_scroll = (
             self.play_position -
             visible_time * 0.5
@@ -431,11 +439,28 @@ class PianoRoll(QWidget):
             )
         )
 
+    def _get_snap_grid(self):
+        if not self.selected_notes:
+            return self.note_length
+        min_beat = None
+        for n in self.selected_notes:
+            b1 = self.midi.time_to_beat(n.start)
+            b2 = self.midi.time_to_beat(n.start + n.duration)
+            beat_len = b2 - b1
+            if min_beat is None or beat_len < min_beat:
+                min_beat = beat_len
+        if min_beat is None or min_beat <= 0:
+            return self.note_length
+        return min_beat
+
     def snap_time(
         self,
         value,
-        grid=0.25
+        grid=None
     ):
+        if grid is None:
+            grid = self.note_length
+            
         beat = self.midi.time_to_beat(
             max(
                 0.0,
@@ -497,6 +522,7 @@ class PianoRoll(QWidget):
 
     def play(self):
         self._pre_play_scroll = self.scroll_x
+        self._is_following_center = False
         self.audio.play()
 
     def pause(self):
@@ -515,7 +541,8 @@ class PianoRoll(QWidget):
             self.audio.position
         )
 
-        self.scroll_x = self._pre_play_scroll
+        if getattr(self, "_is_following_center", False) and getattr(self, "return_to_start_on_stop", True):
+            self.scroll_x = getattr(self, "_pre_play_scroll", self.scroll_x)
 
         self.update()
 
@@ -823,7 +850,7 @@ class PianoRoll(QWidget):
             self.midi.push_undo()
             self._nudge_undo_pushed = True
 
-        grid = 0.25
+        grid = self.note_length
 
         for note in self.selected_notes:
             if d_pitch:
@@ -1055,12 +1082,45 @@ class PianoRoll(QWidget):
             self.bottom_height
         )
 
+        if event.button() == Qt.RightButton:
+            note = self.note_at(x, y)
+
+            if note is None and y >= lane_top and y < lane_top + self.velocity_lane_height:
+                bar = self._velocity_bar_at(x)
+                if bar is not None:
+                    note = bar[0]
+                    self._set_velocity_dialog(note)
+                    return
+                else:
+                    self._vel_press(event, x, y)
+                    return
+
+            if note is not None:
+                self._set_velocity_dialog(note)
+                return
+
+            self.selection_mode = True
+            
+            if y >= lane_top + self.velocity_lane_height:
+                self.selection_start = (self.x_to_time(x), self.min_pitch)
+                self.selection_end = (self.x_to_time(x), self.max_pitch)
+                self.selection_in_lane = True
+                self.selection_in_pedal = True
+            else:
+                self.selection_start = (
+                    self.x_to_time(x),
+                    self.y_to_pitch(y)
+                )
+                self.selection_end = self.selection_start
+                self.selection_in_lane = False
+                self.selection_in_pedal = False
+
+            self.update()
+            return
+
         if (
             y >= lane_top and
-            event.button() in (
-                Qt.LeftButton,
-                Qt.RightButton
-            )
+            event.button() == Qt.LeftButton
         ):
             if (
                 y <
@@ -1086,33 +1146,6 @@ class PianoRoll(QWidget):
                     y
                 )
                 return
-
-        if event.button() == Qt.RightButton:
-            note = self.note_at(
-                x,
-                y
-            )
-
-            if note is not None:
-                self._set_velocity_dialog(
-                    note
-                )
-                return
-
-            self.selection_mode = True
-
-            self.selection_start = (
-                self.x_to_time(x),
-                self.y_to_pitch(y)
-            )
-
-            self.selection_end = (
-                self.selection_start
-            )
-
-            self.update()
-
-            return
 
         if event.button() != Qt.LeftButton:
             return
@@ -1255,6 +1288,10 @@ class PianoRoll(QWidget):
             self.note_duration(start),
             pitch
         )
+
+        if note is None:
+            self.midi.undo() # 重複で追加できなかったのでundoを消す
+            return
 
         if self.audio.playing:
             self.audio.invalidate_midi_cache()
@@ -1553,6 +1590,62 @@ class PianoRoll(QWidget):
         self.update()
         self.marker_edited.emit()
 
+    def auto_scroll(self):
+        is_dragging = (
+            self.selection_mode or
+            self.drag_note is not None or
+            self.vel_drag is not None or
+            self.pedal_drag is not None
+        )
+
+        if not is_dragging:
+            return
+
+        from PySide6.QtGui import QCursor
+        pos = self.mapFromGlobal(QCursor.pos())
+        x = pos.x()
+        y = pos.y()
+
+        # ウィジェットの範囲外にあるかどうかの判定にマージンを使う
+        # しかし、ウィジェット内で端に寄っている場合にもスクロールする
+        margin = 30
+        scroll_amount = 0.0
+
+        if x < self.left_width + margin:
+            scroll_amount = -20.0 * self.seconds_per_pixel
+        elif x > self.width() - margin:
+            scroll_amount = 20.0 * self.seconds_per_pixel
+
+        if scroll_amount != 0.0:
+            visible_time = (self.width() - self.left_width) * self.seconds_per_pixel
+            max_scroll = max(0.0, self.audio_duration - visible_time)
+            
+            new_scroll = max(0.0, min(self.scroll_x + scroll_amount, max_scroll))
+            
+            if new_scroll != self.scroll_x:
+                diff_scroll = new_scroll - self.scroll_x
+                diff_px = diff_scroll / self.seconds_per_pixel
+                self.scroll_x = new_scroll
+                
+                if self.selection_mode and self.selection_start:
+                    lane_top = self.height() - self.bottom_height
+                    self.selection_end = (
+                        self.x_to_time(x),
+                        self.y_to_pitch(y) if y < lane_top else self.min_pitch
+                    )
+                elif self.drag_note is not None:
+                    self.drag_start.setX(self.drag_start.x() - diff_px)
+                    self._note_drag_move(x, y)
+                elif self.vel_drag is not None:
+                    self.vel_drag["x0"] -= diff_px
+                    self._vel_drag_move(x, y)
+                elif self.pedal_drag is not None:
+                    if self.pedal_drag["mode"] == "erase":
+                        self.pedal_drag["x0"] -= diff_px
+                    self._pedal_drag_move(x, y)
+                
+                self.update()
+
     def mouseMoveEvent(
         self,
         event
@@ -1626,18 +1719,22 @@ class PianoRoll(QWidget):
 
         if self.selection_mode:
             if self.selection_start:
+                lane_top = self.height() - self.bottom_height
                 self.selection_end = (
                     self.x_to_time(x),
-                    self.y_to_pitch(y)
+                    self.y_to_pitch(y) if y < lane_top else self.min_pitch
                 )
-
                 self.update()
 
             return
 
-        if not self.drag_note:
+        if self.drag_note:
+            self._note_drag_move(x, y)
             return
 
+        self.update()
+
+    def _note_drag_move(self, x, y):
         dx = (
             x -
             self.drag_start.x()
@@ -1725,38 +1822,32 @@ class PianoRoll(QWidget):
                 )
 
         elif self.drag_mode == "resize":
-            new_duration = self.snap_time(
-                original_duration +
-                dx *
-                self.seconds_per_pixel
+            original_end = original_start + original_duration
+            
+            new_end = self.snap_time(
+                original_end + dx * self.seconds_per_pixel,
+                grid=self.note_length
             )
-
-            diff_duration = new_duration - original_duration
-
+            
+            diff_duration = new_end - original_end
+            min_beats = self.note_length
+            
             if self.drag_original_notes:
                 for n, o_start, o_pitch, o_duration in self.drag_original_notes:
+                    bpm = self.midi.tempo_at(o_start)
+                    min_duration = min_beats * (60.0 / bpm)
+                    
                     n.duration = max(
-                        (
-                            self.midi.beat_to_time(
-                                self.midi.beat_phase + 0.25
-                            ) -
-                            self.midi.beat_to_time(
-                                self.midi.beat_phase
-                            )
-                        ),
+                        min_duration,
                         o_duration + diff_duration
                     )
             else:
+                bpm = self.midi.tempo_at(self.drag_note.start)
+                min_duration = min_beats * (60.0 / bpm)
+                
                 self.drag_note.duration = max(
-                    (
-                        self.midi.beat_to_time(
-                            self.midi.beat_phase + 0.25
-                        ) -
-                        self.midi.beat_to_time(
-                            self.midi.beat_phase
-                        )
-                    ),
-                    new_duration
+                    min_duration,
+                    original_duration + diff_duration
                 )
 
         self.update()
@@ -1809,9 +1900,29 @@ class PianoRoll(QWidget):
                 )
 
         if self.drag_note is not None:
-            self.midi._bump()
-            if self.audio.playing:
-                self.audio.invalidate_midi_cache()
+            is_duplicate = False
+            track = self.midi.tracks[self.drag_track_index]
+            notes_to_check = self.selected_notes if self.drag_original_notes else [self.drag_note]
+            
+            for n in notes_to_check:
+                new_end = n.start + n.duration
+                for other in track.notes:
+                    if other in notes_to_check:
+                        continue
+                    if other.pitch == n.pitch:
+                        other_end = other.start + other.duration
+                        if not (new_end <= other.start + 1e-6 or n.start >= other_end - 1e-6):
+                            is_duplicate = True
+                            break
+                if is_duplicate:
+                    break
+                    
+            if is_duplicate:
+                self.midi.undo()
+            else:
+                self.midi._bump()
+                if self.audio.playing:
+                    self.audio.invalidate_midi_cache()
 
         self.drag_note = None
         self.drag_mode = None
@@ -1981,20 +2092,26 @@ class PianoRoll(QWidget):
             self.selection_end[1]
         )
 
-        self.selected_notes = [
-            note
-            for note in self.midi.visible_notes()
-            if (
-                note.start <
-                t2 and
-                note.start +
-                note.duration >
-                t1 and
-                p1 <=
-                note.pitch <=
-                p2
-            )
-        ]
+        if getattr(self, "selection_in_pedal", False):
+            self.selected_notes = []
+        else:
+            self.selected_notes = [
+                note
+                for note in self.midi.visible_notes()
+                if (
+                    note.start <
+                    t2 and
+                    note.start +
+                    note.duration >
+                    t1 and
+                    p1 <=
+                    note.pitch <=
+                    p2
+                )
+            ]
+
+        self.last_selection_time_range = (t1, t2)
+        self.last_selection_in_pedal = getattr(self, "selection_in_pedal", False)
 
         self.selection_mode = False
         self.selection_start = None
@@ -2059,7 +2176,10 @@ class PianoRoll(QWidget):
         self.update()
 
     def delete_selected(self):
-        if not self.selected_notes:
+        has_notes = bool(self.selected_notes)
+        has_range = hasattr(self, "last_selection_time_range") and self.last_selection_time_range is not None
+        
+        if not has_notes and not has_range:
             return
 
         self.midi.push_undo()
@@ -2070,6 +2190,19 @@ class PianoRoll(QWidget):
             self.midi.remove_note(
                 note
             )
+
+        if has_range:
+            if getattr(self, "last_selection_in_pedal", False):
+                t1, t2 = self.last_selection_time_range
+                track_idx = self.midi.active_track()
+                events = self.midi.tracks[track_idx].pedals
+                removed = [ev for ev in events if t1 <= ev.time <= t2]
+                for ev in removed:
+                    events.remove(ev)
+                if removed and self.midi.filter_track is None and track_idx == 0:
+                    self.midi.sync_pedals(0)
+            self.last_selection_time_range = None
+            self.last_selection_in_pedal = False
 
         if self.audio.playing:
             self.audio.invalidate_midi_cache()
@@ -2383,6 +2516,7 @@ class PianoRoll(QWidget):
     def _vel_drag_end(self):
         self.vel_drag = None
         self._vel_undo_pushed = False
+        self.update()
 
     def _set_velocity_dialog(self, note):
         if (
@@ -2502,30 +2636,47 @@ class PianoRoll(QWidget):
         )
 
         if event.button() == Qt.LeftButton:
-            if hit is not None:
+            is_selected = False
+            t1 = t2 = 0
+            if getattr(self, "last_selection_in_pedal", False) and hasattr(self, "last_selection_time_range") and self.last_selection_time_range:
+                t1, t2 = self.last_selection_time_range
+                if hit is not None and t1 <= hit.time <= t2:
+                    is_selected = True
+
+            if is_selected:
+                selected_events = [ev for ev in events if t1 <= ev.time <= t2]
+                grid = self._get_snap_grid()
                 self.pedal_drag = {
-                    "mode": "move",
-                    "event": hit,
-                    "press_time": hit.time,
-                    "changed": False
+                    "mode": "move_multiple",
+                    "events": selected_events,
+                    "press_time": self.x_to_time(x),
+                    "changed": False,
+                    "original_times": {id(ev): ev.time for ev in selected_events},
+                    "grid": grid
                 }
+            elif hit is not None:
+                self.midi.push_undo()
+                new_ev = self.midi.toggle_pedal(track_index, hit.time)
+                self._pedal_after_change()
+                if new_ev is not None:
+                    grid = self._get_snap_grid()
+                    self.pedal_drag = {
+                        "mode": "move",
+                        "event": new_ev,
+                        "press_time": new_ev.time,
+                        "changed": False,
+                        "grid": grid
+                    }
             else:
                 t = self.snap_time(self.x_to_time(x))
-
                 self.midi.push_undo()
-
-                self.midi.toggle_pedal(
-                    track_index,
-                    t
-                )
-
+                self.midi.toggle_pedal(track_index, t)
                 self.pedal_drag = {
                     "mode": "paint",
                     "last": t,
                     "press_t": t,
                     "changed": True
                 }
-
                 self._pedal_after_change()
         else:
             if hit is not None:
@@ -2562,7 +2713,8 @@ class PianoRoll(QWidget):
 
         if mode == "move":
             t = self.snap_time(
-                self.x_to_time(x)
+                self.x_to_time(x),
+                drag.get("grid", self.note_length)
             )
 
             ev = drag["event"]
@@ -2572,13 +2724,44 @@ class PianoRoll(QWidget):
                     self.midi.push_undo()
                     self._pedal_undo_pushed = True
 
-                self.midi.move_pedal(
-                    track_index,
-                    ev,
-                    t
-                )
+                events_list = self.midi.tracks[track_index].pedals
+                ev.time = t
+                events_list.sort(key=lambda e: e.time)
+                self.midi._bump()
 
                 drag["changed"] = True
+
+                self._pedal_after_change()
+
+        elif mode == "move_multiple":
+            t = self.snap_time(
+                self.x_to_time(x),
+                drag.get("grid", self.note_length)
+            )
+            press_t = self.snap_time(drag["press_time"], drag.get("grid", self.note_length))
+            dt = t - press_t
+
+            if abs(dt) > 1e-6:
+                if not self._pedal_undo_pushed:
+                    self.midi.push_undo()
+                    self._pedal_undo_pushed = True
+                drag["changed"] = True
+
+            if drag.get("changed", False):
+                events_list = self.midi.tracks[track_index].pedals
+                for ev in drag["events"]:
+                    orig_t = drag["original_times"][id(ev)]
+                    new_t = max(0.0, orig_t + dt)
+                    ev.time = new_t
+                    
+                events_list.sort(key=lambda e: e.time)
+                self.midi._bump()
+                if hasattr(self, "last_selection_time_range") and self.last_selection_time_range:
+                    t1, t2 = drag.get("original_range", self.last_selection_time_range)
+                    if "original_range" not in drag:
+                        drag["original_range"] = (t1, t2)
+                    
+                    self.last_selection_time_range = (max(0.0, t1 + dt), max(0.0, t2 + dt))
 
                 self._pedal_after_change()
 
@@ -2671,6 +2854,19 @@ class PianoRoll(QWidget):
             )
 
             self._pedal_after_change()
+
+        if drag["mode"] in ("move", "move_multiple") and drag.get("changed", False):
+            events = self.midi.tracks[track_index].pedals
+            is_duplicate = False
+            
+            for i in range(len(events) - 1):
+                if abs(events[i].time - events[i+1].time) < 1e-6:
+                    is_duplicate = True
+                    break
+                    
+            if is_duplicate:
+                self.midi.undo()
+                self._pedal_after_change()
 
         self.pedal_drag = None
         self._pedal_undo_pushed = False
@@ -3733,16 +3929,16 @@ class PianoRoll(QWidget):
             t2
         )
 
-        y1 = self.pitch_to_y(
-            p2
-        )
-
-        y2 = (
-            self.pitch_to_y(
-                p1
-            ) +
-            self.note_height
-        )
+        if getattr(self, "selection_in_lane", False):
+            if getattr(self, "selection_in_pedal", False):
+                y1 = self.height() - self.bottom_height + self.velocity_lane_height
+                y2 = y1 + self.pedal_lane_height
+            else:
+                y1 = self.height() - self.bottom_height
+                y2 = y1 + self.velocity_lane_height
+        else:
+            y1 = self.pitch_to_y(p2)
+            y2 = self.pitch_to_y(p1) + self.note_height
 
         painter.setPen(
             QPen(
@@ -4983,7 +5179,16 @@ class PianoRoll(QWidget):
             ):
                 continue
 
-            if ev.down:
+            is_selected = False
+            if getattr(self, "last_selection_in_pedal", False) and hasattr(self, "last_selection_time_range") and self.last_selection_time_range:
+                t1, t2 = self.last_selection_time_range
+                if t1 <= ev.time <= t2:
+                    is_selected = True
+
+            if is_selected:
+                painter.setBrush(QBrush(QColor(255, 255, 255)))
+                painter.setPen(QPen(QColor(255, 255, 255), 1))
+            elif ev.down:
                 painter.setBrush(
                     QBrush(
                         QColor(
@@ -5003,23 +5208,6 @@ class PianoRoll(QWidget):
                         ),
                         1
                     )
-                )
-
-                painter.drawPolygon(
-                    [
-                        QPointF(
-                            x,
-                            lane_top + 2
-                        ),
-                        QPointF(
-                            x - 7,
-                            lane_top + 16
-                        ),
-                        QPointF(
-                            x + 7,
-                            lane_top + 16
-                        ),
-                    ]
                 )
             else:
                 painter.setBrush(
@@ -5043,6 +5231,24 @@ class PianoRoll(QWidget):
                     )
                 )
 
+            if ev.down:
+                painter.drawPolygon(
+                    [
+                        QPointF(
+                            x,
+                            lane_top + 2
+                        ),
+                        QPointF(
+                            x - 7,
+                            lane_top + 16
+                        ),
+                        QPointF(
+                            x + 7,
+                            lane_top + 16
+                        ),
+                    ]
+                )
+            else:
                 painter.drawPolygon(
                     [
                         QPointF(
@@ -5059,6 +5265,8 @@ class PianoRoll(QWidget):
                         ),
                     ]
                 )
+
+
 
     def paintEvent(
         self,
@@ -5099,10 +5307,6 @@ class PianoRoll(QWidget):
                 painter
             )
 
-            self.draw_selection(
-                painter
-            )
-
             self.draw_keyboard(
                 painter
             )
@@ -5124,6 +5328,10 @@ class PianoRoll(QWidget):
             )
 
             self.draw_pedal_lane(
+                painter
+            )
+
+            self.draw_selection(
                 painter
             )
         finally:

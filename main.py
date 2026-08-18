@@ -20,7 +20,8 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QVBoxLayout,
-    QFormLayout
+    QFormLayout,
+    QKeySequenceEdit
 )
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtCore import QTimer, Qt
@@ -30,6 +31,66 @@ from midi import MidiData, Note, PedalEvent
 from piano_roll import PianoRoll
 from midiout import list_ports
 from settings import load_value, save_value
+
+DEFAULT_SHORTCUTS = {
+    "action_new_project": "Ctrl+N",
+    "action_open_project": "Ctrl+O",
+    "action_save_project": "Ctrl+S",
+    "action_undo": "Ctrl+Z",
+    "action_redo": "Ctrl+Y",
+    "action_play": "Space"
+}
+
+def get_shortcut(key):
+    val = load_value(f"shortcut_{key}")
+    if val is not None:
+        return val
+    return DEFAULT_SHORTCUTS.get(key, "")
+
+class ShortcutDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("カスタムショートカット")
+        
+        self.edits = {}
+        form = QFormLayout()
+        
+        labels = {
+            "action_new_project": "プロジェクトを新規作成",
+            "action_open_project": "プロジェクトを開く",
+            "action_save_project": "プロジェクトを保存",
+            "action_undo": "元に戻す",
+            "action_redo": "やり直し",
+            "action_play": "再生 / 停止"
+        }
+        
+        for key, label in labels.items():
+            edit = QKeySequenceEdit()
+            edit.setKeySequence(QKeySequence(get_shortcut(key)))
+            self.edits[key] = edit
+            form.addRow(label, edit)
+            
+        reset_btn = QPushButton("デフォルトにリセット")
+        reset_btn.clicked.connect(self.reset_to_defaults)
+        form.addRow("", reset_btn)
+            
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        
+        layout = QVBoxLayout()
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+        self.setLayout(layout)
+        
+    def reset_to_defaults(self):
+        for key, edit in self.edits.items():
+            edit.setKeySequence(QKeySequence(DEFAULT_SHORTCUTS.get(key, "")))
+            
+    def apply_shortcuts(self):
+        for key, edit in self.edits.items():
+            val = edit.keySequence().toString()
+            save_value(f"shortcut_{key}", val)
 
 class SettingsDialog(QDialog):
     def __init__(self, parent=None, current="internal"):
@@ -64,22 +125,26 @@ class SettingsDialog(QDialog):
             selected_index
         )
 
-        refresh_button = QPushButton(
-            "デバイスを更新"
-        )
-        refresh_button.clicked.connect(
-            self._refresh_devices
-        )
+        refresh_button = QPushButton("デバイスを更新")
+        refresh_button.clicked.connect(self._refresh_devices)
+
+        self.backup_cb = QCheckBox("定期バックアップを有効にする")
+        self.backup_cb.setChecked(load_value("auto_backup_enabled", "0") == "1")
+
+        self.backup_spin = QSpinBox()
+        self.backup_spin.setRange(1, 120)
+        self.backup_spin.setSuffix(" 分")
+        self.backup_spin.setValue(int(load_value("auto_backup_interval", "5")))
+
+        self.shortcut_btn = QPushButton("カスタムショートカットの設定...")
+        self.shortcut_btn.clicked.connect(self.open_shortcuts)
 
         form = QFormLayout()
-        form.addRow(
-            "MIDI出力",
-            self._device_combo
-        )
-        form.addRow(
-            "",
-            refresh_button
-        )
+        form.addRow("MIDI出力", self._device_combo)
+        form.addRow("", refresh_button)
+        form.addRow("バックアップ", self.backup_cb)
+        form.addRow("間隔", self.backup_spin)
+        form.addRow("ショートカット", self.shortcut_btn)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.Ok |
@@ -97,6 +162,11 @@ class SettingsDialog(QDialog):
         layout.addWidget(buttons)
 
         self.setLayout(layout)
+
+    def open_shortcuts(self):
+        dlg = ShortcutDialog(self)
+        if dlg.exec() == QDialog.Accepted:
+            dlg.apply_shortcuts()
 
     def _refresh_devices(self):
         current = self._device_combo.currentData()
@@ -199,6 +269,7 @@ class MainWindow(QMainWindow):
             self.after_edit
         )
 
+        self.actions = {}
         self.create_menu()
         self.create_toolbar()
 
@@ -209,7 +280,7 @@ class MainWindow(QMainWindow):
         self.timer.setTimerType(
             Qt.TimerType.PreciseTimer
         )
-        self.timer.start(16)
+        self.timer.start(33)
 
         self._analysis_ready = False
         self._analysis_error = None
@@ -221,14 +292,44 @@ class MainWindow(QMainWindow):
 
         self._mark_project_saved()
 
+        self.auto_backup_timer = QTimer(self)
+        self.auto_backup_timer.timeout.connect(self.auto_backup)
+        self.update_auto_backup_timer()
+
         if initial_file:
             self.open_file_by_path(initial_file)
+
+        self.update_shortcuts()
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
         else:
             event.ignore()
+
+    def update_auto_backup_timer(self):
+        enabled = load_value("auto_backup_enabled", "0") == "1"
+        interval = int(load_value("auto_backup_interval", "5"))
+        if enabled:
+            self.auto_backup_timer.start(interval * 60 * 1000)
+        else:
+            self.auto_backup_timer.stop()
+
+    def auto_backup(self):
+        if self._project_path:
+            self.save_project()
+
+    def update_shortcuts(self):
+        if not hasattr(self, "actions"):
+            return
+        for key, action in self.actions.items():
+            shortcut_str = get_shortcut(key)
+            if shortcut_str:
+                action.setShortcut(QKeySequence(shortcut_str))
+            else:
+                action.setShortcut(QKeySequence())
+
+
 
     def dropEvent(self, event):
         urls = event.mimeData().urls()
@@ -399,6 +500,13 @@ class MainWindow(QMainWindow):
         playback_menu.addAction(
             play_action
         )
+
+        self.actions["action_new_project"] = new_project_action
+        self.actions["action_open_project"] = load_project_action
+        self.actions["action_save_project"] = save_project_action
+        self.actions["action_undo"] = undo_action
+        self.actions["action_redo"] = redo_action
+        self.actions["action_play"] = play_action
 
         stop_action = QAction(
             "停止",
@@ -599,7 +707,10 @@ class MainWindow(QMainWindow):
         )
 
         self.return_to_start_checkbox = QCheckBox(
-            "  停止時に開始位置へ戻る"
+            "停止時に開始位置へ戻る"
+        )
+        self.return_to_start_checkbox.setStyleSheet(
+            "QCheckBox { margin-left: 8px; }"
         )
         self.return_to_start_checkbox.setChecked(
             self.editor.return_to_start_on_stop
@@ -1617,6 +1728,11 @@ class MainWindow(QMainWindow):
             self.editor.set_play_position(
                 self.audio.position
             )
+        else:
+            if getattr(self.audio, "auto_stopped", False):
+                self.audio.auto_stopped = False
+                if getattr(self.editor, "return_to_start_on_stop", True):
+                    self.editor.stop()
 
         if (
             self.offset_box.value() !=
@@ -1633,6 +1749,9 @@ class MainWindow(QMainWindow):
             previous_position
         ):
             self.editor.update()
+
+        if hasattr(self.editor, "auto_scroll"):
+            self.editor.auto_scroll()
 
 if __name__ == "__main__":
     app = QApplication(
