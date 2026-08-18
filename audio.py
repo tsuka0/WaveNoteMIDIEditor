@@ -13,11 +13,13 @@ class AudioData:
         self.position = 0.0
         self.playing = False
         self.paused = False
+        self._a4_freq = 440.0
 
         self._started_at = 0.0
         self._start_position = 0.0
         self._thread = None
         self._play_gen = 0
+        self._latency = 0.0
         self._latency = 0.0
 
         self.midi = None
@@ -65,6 +67,15 @@ class AudioData:
         self._midi_cache_dirty = False
         self._midi_cache_version = 0
 
+    @property
+    def a4_freq(self):
+        return self._a4_freq
+
+    @a4_freq.setter
+    def a4_freq(self, value):
+        self._a4_freq = value
+        self._send_tuning_to_midi_out()
+
     def set_midi(self, midi):
         self.midi = midi
         self._midi_cache_dirty = True
@@ -97,7 +108,7 @@ class AudioData:
                 return False
 
             self._midi_out = device
-
+            self._send_tuning_to_midi_out()
             return True
 
     def _close_midi_out(self):
@@ -547,6 +558,39 @@ class AudioData:
 
         return events
 
+    def _send_tuning_to_midi_out(self):
+        device = self._midi_out
+        if device is None:
+            return
+
+        cents = 1200.0 * np.log2(self.a4_freq / 440.0)
+        coarse = int(round(cents / 100.0))
+        fine_cents = cents - coarse * 100.0
+        
+        fine_val = int(round(8192 + fine_cents * 81.92))
+        fine_val = max(0, min(16383, fine_val))
+        
+        fine_msb = fine_val >> 7
+        fine_lsb = fine_val & 127
+        
+        coarse_val = max(0, min(127, 64 + coarse))
+
+        for ch in range(16):
+            try:
+                device.control_change(101, 0, ch)
+                device.control_change(100, 2, ch)  # RPN 00 02 is Channel Coarse Tuning
+                device.control_change(6, coarse_val, ch)
+                
+                device.control_change(101, 0, ch)
+                device.control_change(100, 1, ch)  # RPN 00 01 is Channel Fine Tuning
+                device.control_change(6, fine_msb, ch)
+                device.control_change(38, fine_lsb, ch)
+                
+                device.control_change(101, 127, ch)
+                device.control_change(100, 127, ch)
+            except Exception:
+                pass
+
     def _midi_out_worker(
         self,
         start_position,
@@ -555,6 +599,7 @@ class AudioData:
         latency
     ):
         try:
+            self._send_tuning_to_midi_out()
             sounding = set()
 
             song_base = start_position
@@ -768,7 +813,7 @@ class AudioData:
             if note_start >= end_time:
                 continue
 
-            frequency = 440.0 * (
+            frequency = self.a4_freq * (
                 2.0 ** ((note.pitch - 69) / 12.0)
             )
 
@@ -862,7 +907,7 @@ class AudioData:
             self.preview_pitch is not None and
             time.perf_counter() < self.preview_until
         ):
-            frequency = 440.0 * (
+            frequency = self.a4_freq * (
                 2.0 ** ((self.preview_pitch - 69) / 12.0)
             )
 
@@ -1057,7 +1102,7 @@ class AudioData:
 
                 sr = self.sr
 
-                freq = 440.0 * (
+                freq = self.a4_freq * (
                     2.0 ** ((pitch - 69) / 12.0)
                 )
 

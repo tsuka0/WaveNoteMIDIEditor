@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from PySide6.QtWidgets import (
     QApplication,
+    QInputDialog,
     QMainWindow,
     QFileDialog,
     QMessageBox,
@@ -1007,6 +1008,7 @@ class MainWindow(QMainWindow):
             "audio_offset": self.audio.offset,
             "audio_volume": self.audio.volume,
             "audio_file": self.audio.file_path,
+            "audio_a4_freq": getattr(self.audio, "a4_freq", 440.0),
         }
 
         for track in self.midi.tracks:
@@ -1208,8 +1210,10 @@ class MainWindow(QMainWindow):
         # 音声設定の復元
         project_audio_offset = project.get("audio_offset", 0.0)
         project_audio_volume = project.get("audio_volume", 0.5)
+        project_audio_a4 = project.get("audio_a4_freq", 440.0)
         self.audio.offset = project_audio_offset
         self.audio.volume = project_audio_volume
+        self.audio.a4_freq = project_audio_a4
 
         # エディタにMIDIを設定
         self.editor.set_midi(self.midi)
@@ -1281,7 +1285,8 @@ class MainWindow(QMainWindow):
                         self.audio.y,
                         self.audio.sr,
                         self.editor.min_pitch,
-                        self.editor.max_pitch
+                        self.editor.max_pitch,
+                        self.audio.a4_freq
                     )
                     if token == self._analysis_token:
                         self._analysis_ready = True
@@ -1492,6 +1497,21 @@ class MainWindow(QMainWindow):
             )
             return
 
+        val, ok = QInputDialog.getDouble(
+            self,
+            "基準周波数の設定",
+            "A=440Hz以外のチューニングを使用する場合は変更してください：",
+            440.0,
+            400.0,
+            500.0,
+            1
+        )
+        if not ok:
+            return
+        
+        a4_freq = val
+        self.audio.a4_freq = a4_freq
+
         try:
             self._analysis_token += 1
             token = self._analysis_token
@@ -1520,7 +1540,8 @@ class MainWindow(QMainWindow):
                         self.audio.y,
                         self.audio.sr,
                         self.editor.min_pitch,
-                        self.editor.max_pitch
+                        self.editor.max_pitch,
+                        self.audio.a4_freq
                     )
 
                     if analyze_tempo:

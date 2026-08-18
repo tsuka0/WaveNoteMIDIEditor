@@ -251,22 +251,7 @@ class PianoRoll(QWidget):
         self,
         value
     ):
-        if self.selected_notes:
-            beats = min(
-                note.duration * (self.midi.tempo_at(note.start) / 60.0)
-                for note in self.selected_notes
-            )
-        else:
-            beats = (
-                self.placement_beats
-                if self.placement_beats is not None
-                else self.note_length
-            )
-
-        grid = max(
-            0.25,
-            beats
-        )
+        grid = self.note_length
 
         beat = self.midi.time_to_beat(
             max(
@@ -890,6 +875,32 @@ class PianoRoll(QWidget):
                         )
                     )
                 )
+
+        # 重複チェック
+        is_duplicate = False
+        track_index = self.midi.active_track()
+        track = self.midi.tracks[track_index]
+        
+        for n in self.selected_notes:
+            new_end = n.start + n.duration
+            for other in track.notes:
+                if other in self.selected_notes:
+                    continue
+                if other.pitch == n.pitch:
+                    other_end = other.start + other.duration
+                    if not (new_end <= other.start + 1e-6 or n.start >= other_end - 1e-6):
+                        is_duplicate = True
+                        break
+            if is_duplicate:
+                break
+                
+        if is_duplicate:
+            self.midi.undo()
+            # undoしたことでself.selected_notesの参照が古くなるため、クリアするか新しく見つける必要がある
+            # ここでは安全のために選択を解除する
+            self.selected_notes = []
+            self.update()
+            return
 
         if d_pitch and self.selected_notes:
             self.preview_pitch(
@@ -1919,6 +1930,8 @@ class PianoRoll(QWidget):
                     
             if is_duplicate:
                 self.midi.undo()
+                self.selected_notes = []
+                self.update()
             else:
                 self.midi._bump()
                 if self.audio.playing:
