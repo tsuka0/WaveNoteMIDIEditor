@@ -5,6 +5,15 @@ import ctypes
 import threading
 import json
 from pathlib import Path
+
+def get_resource_path(relative_path):
+    import sys, os
+    try:
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(os.path.dirname(__file__))
+    return os.path.join(base_path, relative_path)
+
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -235,7 +244,7 @@ class MainWindow(QMainWindow):
     def __init__(self, initial_file=None):
         super().__init__()
 
-        icon_path = os.path.join(os.path.dirname(__file__), "Assets", "icon.ico")
+        icon_path = get_resource_path(os.path.join("Assets", "icon.ico"))
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
         self.setWindowTitle("WaveNoteMIDIEditor")
@@ -1803,7 +1812,7 @@ if __name__ == "__main__":
         sys.argv
     )
 
-    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Assets", "icon.ico")
+    icon_path = get_resource_path(os.path.join("Assets", "icon.ico"))
     if os.path.exists(icon_path):
         app.setWindowIcon(QIcon(icon_path))
 
