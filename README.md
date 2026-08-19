@@ -1,4 +1,9 @@
-﻿# WaveNote MIDI Editor
+﻿
+<p align="center">
+  <img src="./Assets/icon.ico" width="128">
+</p>
+
+# WaveNote MIDI Editor 
 
 音声ファイルのスペクトラムを確認しながら、MIDIを作成・編集できる Windows 向けピアノロールエディタです。音声とMIDIを同じタイムラインで扱えるため、耳と視覚の両方を使ってノートを調整できます。
 
@@ -109,3 +114,9 @@ MIDIファイルを読み込んだ場合は、そのMIDIに含まれるテンポ
 ```
 python -m PyInstaller --onefile --windowed --icon=Assets\icon.ico main.py
 ```
+## アイコン制作
+アイコンは[てつ(XIAO)](https://x.com/tt_xiaop)さんに作って頂きました！  
+ありがとうございます(´;ω;｀)
+
+## License
+[各ライブラリ](requirements.txt)のライセンスを確認してください
