@@ -115,8 +115,8 @@ MIDIファイルを読み込んだ場合は、そのMIDIに含まれるテンポ
 python -m PyInstaller --onefile --windowed --icon=Assets\icon.ico main.py
 ```
 ## アイコン制作
-アイコンは[てつ(XIAO)](https://x.com/tt_xiaop)さんに作って頂きました！  
+アイコンは[てつ(XIAO)](https://x.com/tt_xiaop)さんに作って頂きました...！  
 ありがとうございます(´;ω;｀)
 
 ## License
-[各ライブラリ](requirements.txt)のライセンスを確認してください
+[各ライブラリ](requirements.txt)のライセンスを確認してください。

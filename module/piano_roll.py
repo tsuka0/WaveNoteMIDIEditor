@@ -584,8 +584,13 @@ class PianoRoll(QWidget):
             self.audio.position
         )
 
-        if getattr(self, "_has_paged", False) and getattr(self, "return_to_start_on_stop", True):
-            self.scroll_x = getattr(self, "_pre_play_scroll", self.scroll_x)
+        if getattr(self, "return_to_start_on_stop", True):
+            visible_time = (self.width() - self.left_width) * self.seconds_per_pixel
+            current_left_time = self.scroll_x
+            current_right_time = self.scroll_x + visible_time
+            
+            if not (current_left_time <= self.play_position <= current_right_time):
+                self.scroll_x = getattr(self, "_pre_play_scroll", self.scroll_x)
 
         self.update()
 
@@ -1223,11 +1228,22 @@ class PianoRoll(QWidget):
                 cut_action = menu.addAction("切り取り")
                 delete_action = menu.addAction("削除")
 
+                octave_up_action = None
+                octave_down_action = None
+                if len(sel_notes) >= 1:
+                    menu.addSeparator()
+                    octave_up_action = menu.addAction("オクターブ上")
+                    octave_down_action = menu.addAction("オクターブ下")
+
                 action = menu.exec(event.globalPosition().toPoint())
 
                 if action:
                     if vel_action and action == vel_action:
                         self._set_velocity_dialog(sel_notes[0])
+                    elif octave_up_action and action == octave_up_action:
+                        self.transpose_selected(12)
+                    elif octave_down_action and action == octave_down_action:
+                        self.transpose_selected(-12)
                     elif merge_action and action == merge_action:
                         self._merge_notes(sel_notes)
                     elif action == copy_action:
@@ -1281,11 +1297,22 @@ class PianoRoll(QWidget):
                     cut_action = menu.addAction("切り取り")
                     delete_action = menu.addAction("削除")
 
+                    octave_up_action = None
+                    octave_down_action = None
+                    if len(sel_notes) >= 1:
+                        menu.addSeparator()
+                        octave_up_action = menu.addAction("オクターブ上")
+                        octave_down_action = menu.addAction("オクターブ下")
+
                     action = menu.exec(event.globalPosition().toPoint())
 
                     if action:
                         if vel_action and action == vel_action:
                             self._set_velocity_dialog(sel_notes[0])
+                        elif octave_up_action and action == octave_up_action:
+                            self.transpose_selected(12)
+                        elif octave_down_action and action == octave_down_action:
+                            self.transpose_selected(-12)
                         elif merge_action and action == merge_action:
                             self._merge_notes(sel_notes)
                         elif action == copy_action:
@@ -3021,6 +3048,49 @@ class PianoRoll(QWidget):
 
         self.midi._bump()
 
+        if self.audio.playing:
+            self.audio.invalidate_midi_cache()
+
+        self.update()
+
+    def transpose_selected(self, offset):
+        if not self.selected_notes:
+            return
+
+        self.midi.push_undo()
+
+        for note in self.selected_notes:
+            note.pitch = max(
+                self.min_pitch,
+                min(
+                    self.max_pitch,
+                    note.pitch + offset
+                )
+            )
+
+        # 重複チェック
+        is_duplicate = False
+        exclude_set = {id(n) for n in self.selected_notes}
+        
+        for n in self.selected_notes:
+            track_idx = self._note_track_index(n)
+            new_end = n.start + n.duration
+            if self._has_overlap_in_track_exclude(track_idx, exclude_set, n.start, new_end, n.pitch):
+                is_duplicate = True
+                break
+
+        if is_duplicate:
+            self.midi.undo()
+            self.selected_notes = []
+            self.selection_rect = None
+            self.update()
+            return
+
+        self.preview_pitch(
+            self.selected_notes[-1].pitch
+        )
+
+        self.midi._bump()
         if self.audio.playing:
             self.audio.invalidate_midi_cache()
 
