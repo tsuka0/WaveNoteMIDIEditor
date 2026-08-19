@@ -1,6 +1,7 @@
 import os
 import time
 import sys
+import ctypes
 import threading
 import json
 from pathlib import Path
@@ -25,7 +26,7 @@ from PySide6.QtWidgets import (
     QFormLayout, 
     QKeySequenceEdit
 )
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtGui import QAction, QKeySequence, QIcon
 from PySide6.QtCore import QTimer, Qt, QEvent, QObject
 from module.audio import AudioData
 from module.spectrum import SpectrumData
@@ -233,6 +234,10 @@ class TrackComboFilter(QObject):
 class MainWindow(QMainWindow):
     def __init__(self, initial_file=None):
         super().__init__()
+
+        icon_path = os.path.join(os.path.dirname(__file__), "Assets", "icon.ico")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
         self.setWindowTitle("WaveNoteMIDIEditor")
         self.showMaximized()
         self.setAcceptDrops(True)
@@ -1787,9 +1792,20 @@ class MainWindow(QMainWindow):
             self.editor.auto_scroll()
 
 if __name__ == "__main__":
+    try:
+        import ctypes
+        myappid = "wavenote.midi.editor.v2"
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+    except Exception:
+        pass
+
     app = QApplication(
         sys.argv
     )
+
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Assets", "icon.ico")
+    if os.path.exists(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
 
     app.setStyle(
         "Fusion"
