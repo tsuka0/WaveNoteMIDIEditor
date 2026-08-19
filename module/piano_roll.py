@@ -1450,7 +1450,7 @@ class PianoRoll(QWidget):
 
         in_rect, on_right_edge, _ = self._click_in_selection_rect(x, y)
         if in_rect and self.selected_notes and not getattr(self, "selection_in_lane", False) and not getattr(self, "selection_in_pedal", False):
-            if self.audio.playing:
+            if self.audio.playing and not on_right_edge:
                 return
             self.midi.push_undo()
             self.drag_start = QPointF(x, y)
@@ -1479,8 +1479,19 @@ class PianoRoll(QWidget):
         )
 
         if note:
-            if self.audio.playing:
+            note_end_x = self.time_to_x(
+                note.start +
+                note.duration
+            )
+
+            is_resize = abs(
+                x -
+                note_end_x
+            ) <= 8
+
+            if self.audio.playing and not is_resize:
                 return
+
             self.midi.push_undo()
 
             self.drag_note = note
@@ -1502,15 +1513,7 @@ class PianoRoll(QWidget):
                 note.pitch
             )
 
-            note_end_x = self.time_to_x(
-                note.start +
-                note.duration
-            )
-
-            if abs(
-                x -
-                note_end_x
-            ) <= 8:
+            if is_resize:
                 self.drag_mode = "resize"
             else:
                 self.drag_mode = "move"
@@ -2335,6 +2338,8 @@ class PianoRoll(QWidget):
         if in_rect and self.selected_notes and not getattr(self, "selection_in_lane", False) and not getattr(self, "selection_in_pedal", False):
             if on_right_edge:
                 self.setCursor(Qt.SizeHorCursor)
+            elif self.audio.playing:
+                self.setCursor(Qt.CrossCursor)
             else:
                 self.setCursor(Qt.SizeAllCursor)
             return
@@ -2356,6 +2361,10 @@ class PianoRoll(QWidget):
             ) <= 8:
                 self.setCursor(
                     Qt.SizeHorCursor
+                )
+            elif self.audio.playing:
+                self.setCursor(
+                    Qt.CrossCursor
                 )
             else:
                 self.setCursor(

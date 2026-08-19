@@ -1757,9 +1757,7 @@ class MainWindow(QMainWindow):
                     self.midi.set_beat_phase(0.0)
                     self.editor.bpm = bpm
 
-                    self.tempo_box.blockSignals(True)
-                    self.tempo_box.setValue(int(round(bpm)))
-                    self.tempo_box.blockSignals(False)
+
 
                 self.editor.update_timeline()
                 self.editor.warm_spectrum_cache()

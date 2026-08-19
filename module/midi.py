@@ -865,7 +865,8 @@ class MidiData:
 
     def save(self, path):
         midi = mido.MidiFile(
-            ticks_per_beat=480
+            ticks_per_beat=480,
+            charset='utf-8'
         )
 
         ticks_per_beat = 480
@@ -942,13 +943,26 @@ class MidiData:
 
             prev_tick = tick
 
-        for track in self.tracks:
+        for track_idx, track in enumerate(self.tracks):
             if not track.notes and not track.pedals:
                 continue
 
             mtrack = mido.MidiTrack()
-
             midi.tracks.append(mtrack)
+
+            if track.name:
+                mtrack.append(
+                    mido.MetaMessage(
+                        "track_name",
+                        name=track.name,
+                        time=0
+                    )
+                )
+
+            # Assign a unique channel per track, skipping channel 9 (drums in GM)
+            export_channel = track_idx % 15
+            if export_channel >= 9:
+                export_channel += 1
 
             events = []
 
@@ -1014,13 +1028,12 @@ class MidiData:
                 current_tick = tick
 
                 if event_type == 1:
-                    channel = getattr(payload, 'channel', track.channel)
                     mtrack.append(
                         mido.Message(
                             "note_on",
                             note=payload.pitch,
                             velocity=payload.velocity,
-                            channel=channel,
+                            channel=export_channel,
                             time=delta
                         )
                     )
@@ -1034,18 +1047,17 @@ class MidiData:
                                 if payload
                                 else 0
                             ),
-                            channel=track.channel,
+                            channel=export_channel,
                             time=delta
                         )
                     )
                 else:
-                    channel = getattr(payload, 'channel', track.channel)
                     mtrack.append(
                         mido.Message(
                             "note_off",
                             note=payload.pitch,
                             velocity=0,
-                            channel=channel,
+                            channel=export_channel,
                             time=delta
                         )
                     )
@@ -1053,7 +1065,7 @@ class MidiData:
         midi.save(path)
 
     def load(self, path):
-        midi = mido.MidiFile(path)
+        midi = mido.MidiFile(path, charset='utf-8')
 
         ticks_per_beat = midi.ticks_per_beat
 

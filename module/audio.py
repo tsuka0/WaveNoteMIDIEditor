@@ -1358,7 +1358,8 @@ class AudioData:
 
         out_wave = np.zeros(total_samples, dtype=np.float32)
 
-        # 險ｭ螳壹・騾驕ｿ・亥・驛ｨ髻ｳ貅舌ｒ蠑ｷ蛻ｶ・・・繝医Λ繝・け蜃ｺ蜉幢ｼ・        old_midi_out = self._midi_out
+        # 設定の退避（内部音源を強制、全トラック出力）
+        old_midi_out = self._midi_out
         old_filter = self.midi.filter_track
         
         try:
