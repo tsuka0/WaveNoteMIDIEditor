@@ -341,18 +341,7 @@ class AudioData:
             nonlocal next_note_idx
             active_notes.clear()
             self.midi_phase.clear()
-            
-            i0 = bisect.bisect_left(self._r_starts, time_pos - self._r_max_dur - 0.001)
-            next_note_idx = bisect.bisect_right(self._r_starts, time_pos)
-            
-            for i in range(i0, next_note_idx):
-                note = self._r_notes[i]
-                if note.start + note.duration > time_pos:
-                    active_notes[id(note)] = note
-                    
-            for note in self._r_long_notes:
-                if note.start <= time_pos and note.start + note.duration > time_pos:
-                    active_notes[id(note)] = note
+            next_note_idx = bisect.bisect_left(self._r_starts, time_pos)
         
         reset_active_notes(start_position)
 
@@ -504,6 +493,9 @@ class AudioData:
             note_start = note.start
             note_end = note.start + note.duration
 
+            if note_start < start_position:
+                continue
+
             if note_end <= start_position:
                 continue
 
@@ -641,7 +633,7 @@ class AudioData:
             wall_base = time.perf_counter() + latency
 
             events = self._build_midi_events(
-                self._r_notes,
+                self._r_notes + self._r_long_notes,
                 song_base,
                 total_time
             )

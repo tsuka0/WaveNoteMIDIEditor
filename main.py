@@ -33,6 +33,7 @@ from module.midi import MidiData, Note, PedalEvent
 from module.piano_roll import PianoRoll
 from module.midiout import list_ports
 from module.settings import load_value, save_value
+from module.discord_rpc import DiscordRPC
 
 DEFAULT_SHORTCUTS = {
     "action_new_project": "Ctrl+N",
@@ -142,6 +143,9 @@ class SettingsDialog(QDialog):
         self.backup_spin.setSuffix(" 分")
         self.backup_spin.setValue(int(load_value("auto_backup_interval", "5")))
 
+        self.discord_cb = QCheckBox("DiscordのRich Presenceを有効にする")
+        self.discord_cb.setChecked(load_value("discord_rpc_enabled", "1") == "1")
+
         self.shortcut_btn = QPushButton("カスタムショートカットの設定...")
         self.shortcut_btn.clicked.connect(self.open_shortcuts)
 
@@ -150,6 +154,7 @@ class SettingsDialog(QDialog):
         form.addRow("", refresh_button)
         form.addRow("バックアップ", self.backup_cb)
         form.addRow("間隔", self.backup_spin)
+        form.addRow("Discord", self.discord_cb)
         form.addRow("ショートカット", self.shortcut_btn)
 
         buttons = QDialogButtonBox(
@@ -177,6 +182,7 @@ class SettingsDialog(QDialog):
     def accept(self):
         save_value("auto_backup_enabled", "1" if self.backup_cb.isChecked() else "0")
         save_value("auto_backup_interval", str(self.backup_spin.value()))
+        save_value("discord_rpc_enabled", "1" if self.discord_cb.isChecked() else "0")
         super().accept()
 
     def _refresh_devices(self):
@@ -320,6 +326,14 @@ class MainWindow(QMainWindow):
         self.auto_backup_timer.timeout.connect(self.auto_backup)
         self.update_auto_backup_timer()
 
+        self.discord_rpc = DiscordRPC("1539607179135418409")
+        self.discord_rpc_timer = QTimer(self)
+        self.discord_rpc_timer.timeout.connect(self.update_discord_rpc)
+        self.discord_rpc_timer.start(5000)
+        import time
+        self._discord_start_time = time.time()
+        self.update_discord_rpc()
+
         if initial_file:
             self.open_file_by_path(initial_file)
 
@@ -330,6 +344,18 @@ class MainWindow(QMainWindow):
             event.acceptProposedAction()
         else:
             event.ignore()
+
+    def update_discord_rpc(self):
+        enabled = load_value("discord_rpc_enabled", "1") == "1"
+        if not enabled:
+            if getattr(self, "discord_rpc", None) and self.discord_rpc.connected:
+                self.discord_rpc.close()
+            return
+            
+        self.discord_rpc.update(
+            details="WaveNoteMIDIEditor",
+            start_time=self._discord_start_time
+        )
 
     def update_auto_backup_timer(self):
         enabled = load_value("auto_backup_enabled", "0") == "1"
@@ -434,6 +460,8 @@ class MainWindow(QMainWindow):
                     event.ignore()
                     return
 
+        self.discord_rpc_timer.stop()
+        self.discord_rpc.close()
         self.audio.stop()
         self.audio._close_midi_out()
         super().closeEvent(event)
@@ -886,6 +914,14 @@ class MainWindow(QMainWindow):
             self.audio.output_device
         )
         self.update_auto_backup_timer()
+
+        self.discord_rpc = DiscordRPC("1539710543751942214")
+        self.discord_rpc_timer = QTimer(self)
+        self.discord_rpc_timer.timeout.connect(self.update_discord_rpc)
+        self.discord_rpc_timer.start(5000)
+        import time
+        self._discord_start_time = time.time()
+        self.update_discord_rpc()
 
     def refresh_track_combo(self):
         self.track_combo.blockSignals(True)

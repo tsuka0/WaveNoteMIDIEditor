@@ -393,52 +393,23 @@ class PianoRoll(QWidget):
     ):
         if not (self.audio.playing or force):
             return
+            
+        if getattr(self, "panning", False) and not force:
+            return
 
-        visible_time = (
-            self.width() -
-            self.left_width
-        ) * self.seconds_per_pixel
-
-        current_right_edge = self.scroll_x + visible_time
-
-        if not getattr(self, "_is_following_center", False) and not force:
-            if self.play_position >= current_right_edge:
-                self._is_following_center = True
-            else:
-                return
-
-        target_scroll = (
-            self.play_position -
-            visible_time * 0.5
-        )
-
-        max_scroll = max(
-            0.0,
-            self.audio_duration -
-            visible_time
-        )
-
-        raw = max(
-            0.0,
-            min(
-                target_scroll,
-                max_scroll
-            )
-        )
-
-        pixel = round(
-            raw /
-            max(
-                self.seconds_per_pixel,
-                1e-9
-            )
-        )
-
-        self.scroll_x = min(
-            max_scroll,
-            pixel *
-            self.seconds_per_pixel
-        )
+        visible_time = (self.width() - self.left_width) * self.seconds_per_pixel
+        
+        current_left_time = self.scroll_x
+        current_right_time = self.scroll_x + visible_time
+        
+        if self.play_position > current_right_time:
+            self.scroll_x = max(0.0, self.play_position - visible_time * 0.05)
+            self._has_paged = True
+            self.update()
+        elif self.play_position < current_left_time:
+            self.scroll_x = max(0.0, self.play_position - visible_time * 0.05)
+            self._has_paged = True
+            self.update()
 
     def time_to_x(
         self,
@@ -585,12 +556,17 @@ class PianoRoll(QWidget):
             else:
                 self.pause()
         else:
+            self._pre_play_scroll = self.scroll_x
+            self._is_following_center = False
+            self._has_paged = False
             self.play()
 
     def play(self):
         self._pre_play_scroll = self.scroll_x
         self._is_following_center = False
-        self.audio.play()
+        self._has_paged = False
+        if not self.audio.playing:
+            self.audio.play()
 
     def pause(self):
         self.audio.pause()
@@ -608,7 +584,7 @@ class PianoRoll(QWidget):
             self.audio.position
         )
 
-        if getattr(self, "_is_following_center", False) and getattr(self, "return_to_start_on_stop", True):
+        if getattr(self, "_has_paged", False) and getattr(self, "return_to_start_on_stop", True):
             self.scroll_x = getattr(self, "_pre_play_scroll", self.scroll_x)
 
         self.update()
