@@ -389,20 +389,25 @@ class MidiData:
             self.filter_track is not None and
             0 <= self.filter_track < len(self.tracks)
         ):
-            return self._sustain_extended_notes(
+            notes = self._sustain_extended_notes(
                 self.tracks[self.filter_track].notes,
                 self.pedal_pairs(self.filter_track)
             )
+            ch = self.tracks[self.filter_track].channel
+            for n in notes:
+                n.channel = ch
+            return notes
 
         result = []
 
         for i, track in enumerate(self.tracks):
-            result.extend(
-                self._sustain_extended_notes(
-                    track.notes,
-                    self.pedal_pairs(i)
-                )
+            notes = self._sustain_extended_notes(
+                track.notes,
+                self.pedal_pairs(i)
             )
+            for n in notes:
+                n.channel = track.channel
+            result.extend(notes)
 
         return result
 

@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from PySide6.QtWidgets import (
     QApplication,
+    QHBoxLayout,
     QInputDialog,
     QMainWindow,
     QFileDialog,
@@ -21,17 +22,17 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QVBoxLayout,
-    QFormLayout,
+    QFormLayout, 
     QKeySequenceEdit
 )
 from PySide6.QtGui import QAction, QKeySequence
-from PySide6.QtCore import QTimer, Qt
-from audio import AudioData
-from spectrum import SpectrumData
-from midi import MidiData, Note, PedalEvent
-from piano_roll import PianoRoll
-from midiout import list_ports
-from settings import load_value, save_value
+from PySide6.QtCore import QTimer, Qt, QEvent, QObject
+from module.audio import AudioData
+from module.spectrum import SpectrumData
+from module.midi import MidiData, Note, PedalEvent
+from module.piano_roll import PianoRoll
+from module.midiout import list_ports
+from module.settings import load_value, save_value
 
 DEFAULT_SHORTCUTS = {
     "action_new_project": "Ctrl+N",
@@ -39,7 +40,9 @@ DEFAULT_SHORTCUTS = {
     "action_save_project": "Ctrl+S",
     "action_undo": "Ctrl+Z",
     "action_redo": "Ctrl+Y",
-    "action_play": "Space"
+    "action_play": "Space",
+    "action_split": "S",
+    "action_select_all": "Ctrl+A"
 }
 
 def get_shortcut(key):
@@ -62,7 +65,9 @@ class ShortcutDialog(QDialog):
             "action_save_project": "プロジェクトを保存",
             "action_undo": "元に戻す",
             "action_redo": "やり直し",
-            "action_play": "再生 / 停止"
+            "action_play": "再生 / 停止",
+            "action_split": "ノーツを分割",
+            "action_select_all": "すべて選択"
         }
         
         for key, label in labels.items():
@@ -169,6 +174,11 @@ class SettingsDialog(QDialog):
         if dlg.exec() == QDialog.Accepted:
             dlg.apply_shortcuts()
 
+    def accept(self):
+        save_value("auto_backup_enabled", "1" if self.backup_cb.isChecked() else "0")
+        save_value("auto_backup_interval", str(self.backup_spin.value()))
+        super().accept()
+
     def _refresh_devices(self):
         current = self._device_combo.currentData()
 
@@ -203,12 +213,25 @@ class SettingsDialog(QDialog):
     def output_device(self):
         return self._device_combo.currentData()
 
+class TrackComboFilter(QObject):
+    def __init__(self, main_window):
+        super().__init__(main_window)
+        self.main_window = main_window
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.MouseButtonPress and event.button() == Qt.RightButton:
+            self.main_window.rename_track()
+            return True
+        return super().eventFilter(obj, event)
+
 class MainWindow(QMainWindow):
     def __init__(self, initial_file=None):
         super().__init__()
         self.setWindowTitle("WaveNoteMIDIEditor")
         self.showMaximized()
         self.setAcceptDrops(True)
+        self.setContextMenuPolicy(Qt.PreventContextMenu)
+        self.menuBar().setContextMenuPolicy(Qt.PreventContextMenu)
 
         self.audio = AudioData()
         self.spectrum = SpectrumData()
@@ -281,7 +304,7 @@ class MainWindow(QMainWindow):
         self.timer.setTimerType(
             Qt.TimerType.PreciseTimer
         )
-        self.timer.start(33)
+        self.timer.start(16)
 
         self._analysis_ready = False
         self._analysis_error = None
@@ -319,6 +342,8 @@ class MainWindow(QMainWindow):
     def auto_backup(self):
         if self._project_path:
             self.save_project()
+            current_time = time.strftime("%H:%M")
+            self.statusBar().showMessage(f"バックアップを保存しました ({current_time})", 5000)
 
     def update_shortcuts(self):
         if not hasattr(self, "actions"):
@@ -502,12 +527,32 @@ class MainWindow(QMainWindow):
             play_action
         )
 
+        split_action = QAction(
+            "分割",
+            self
+        )
+        split_action.triggered.connect(
+            self.editor.split_notes_at_play_position
+        )
+        edit_menu.addAction(split_action)
+
         self.actions["action_new_project"] = new_project_action
         self.actions["action_open_project"] = load_project_action
         self.actions["action_save_project"] = save_project_action
         self.actions["action_undo"] = undo_action
         self.actions["action_redo"] = redo_action
         self.actions["action_play"] = play_action
+        self.actions["action_split"] = split_action
+
+        select_all_action = QAction(
+            "すべて選択",
+            self
+        )
+        select_all_action.triggered.connect(
+            self.editor.select_all
+        )
+        edit_menu.addAction(select_all_action)
+        self.actions["action_select_all"] = select_all_action
 
         stop_action = QAction(
             "停止",
@@ -541,6 +586,7 @@ class MainWindow(QMainWindow):
         )
 
         toolbar.setMovable(False)
+        toolbar.setContextMenuPolicy(Qt.PreventContextMenu)
 
         track_label = QLabel(
             "  トラック "
@@ -551,6 +597,8 @@ class MainWindow(QMainWindow):
         )
 
         self.track_combo = QComboBox()
+        self.track_filter = TrackComboFilter(self)
+        self.track_combo.installEventFilter(self.track_filter)
 
         self.refresh_track_combo()
 
@@ -579,37 +627,12 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(
             add_track_button
         )
-
-        tempo_label = QLabel(
-            "  テンポ "
-        )
-
-        toolbar.addWidget(
-            tempo_label
-        )
-
-        self.tempo_box = QSpinBox()
-
-        self.tempo_box.setRange(
-            20,
-            999
-        )
-
-        self.tempo_box.setValue(
-            self.midi.bpm
-        )
-
-        self.tempo_box.setSuffix(
-            " BPM"
-        )
-
-        self.tempo_box.valueChanged.connect(
-            self.change_tempo
-        )
-
-        toolbar.addWidget(
-            self.tempo_box
-        )
+        
+        spacer = QLabel("   ")
+        toolbar.addWidget(spacer)
+        toolbar.addSeparator()
+        spacer2 = QLabel("   ")
+        toolbar.addWidget(spacer2)
 
         insert_tempo_button = QPushButton(
             "テンポ追加"
@@ -620,67 +643,22 @@ class MainWindow(QMainWindow):
         insert_tempo_button.clicked.connect(
             self.insert_tempo
         )
-
         toolbar.addWidget(
             insert_tempo_button
         )
 
-        timesig_label = QLabel(
-            "  拍子 "
-        )
-
-        toolbar.addWidget(
-            timesig_label
-        )
-
-        self.num_box = QSpinBox()
-
-        self.num_box.setRange(
-            1,
-            32
-        )
-
-        self.num_box.setValue(4)
-
-        toolbar.addWidget(
-            self.num_box
-        )
-
-        slash_label = QLabel(
-            "/"
-        )
-
-        toolbar.addWidget(
-            slash_label
-        )
-
-        self.den_box = QSpinBox()
-
-        self.den_box.setRange(
-            1,
-            32
-        )
-
-        self.den_box.setValue(4)
-
-        toolbar.addWidget(
-            self.den_box
-        )
-
         insert_timesig_button = QPushButton(
-            "拍子設定"
+            "拍子追加"
         )
         insert_timesig_button.setToolTip(
-            "再生位置で拍子を変更"
+            "再生位置に拍子を挿入"
         )
         insert_timesig_button.clicked.connect(
             self.insert_timesig
         )
-
         toolbar.addWidget(
             insert_timesig_button
         )
-
         length_label = QLabel(
             "  ノート長 "
         )
@@ -907,6 +885,7 @@ class MainWindow(QMainWindow):
             "midi_out_device",
             self.audio.output_device
         )
+        self.update_auto_backup_timer()
 
     def refresh_track_combo(self):
         self.track_combo.blockSignals(True)
@@ -957,6 +936,24 @@ class MainWindow(QMainWindow):
         self.change_track(
             self.track_combo.currentIndex()
         )
+
+    def rename_track(self):
+        index = self.track_combo.currentData()
+        if index is None:
+            return
+
+        track = self.midi.tracks[index]
+        new_name, ok = QInputDialog.getText(
+            self,
+            "トラック名の変更",
+            "新しいトラック名:",
+            text=track.name
+        )
+
+        if ok and new_name:
+            self.midi.push_undo()
+            track.name = new_name
+            self.refresh_track_combo()
 
     def change_return_to_start(self, checked):
         self.editor.return_to_start_on_stop = checked
@@ -1037,12 +1034,23 @@ class MainWindow(QMainWindow):
         return project
 
     def _project_state(self):
-        return json.dumps(
-            self._project_data(),
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":")
+        counts = (
+            tuple(
+                len(track.notes)
+                for track in self.midi.tracks
+            ),
+            tuple(
+                len(track.pedals)
+                for track in self.midi.tracks
+            ),
+            len(self.midi.tempos),
+            len(self.midi.time_signatures),
+            self.audio.offset,
+            self.audio.volume,
+            getattr(self.audio, "a4_freq", 440.0),
+            self.midi.filter_track,
         )
+        return counts
 
     def _mark_project_saved(self):
         self._saved_project_state = self._project_state()
@@ -1220,19 +1228,6 @@ class MainWindow(QMainWindow):
         self.audio.set_midi(self.midi)
 
         # ツールバーUIの同期
-        self.tempo_box.blockSignals(True)
-        self.tempo_box.setValue(int(round(self.midi.bpm)))
-        self.tempo_box.blockSignals(False)
-
-        num, den = self.midi.time_sig_at(0.0)
-        self.num_box.blockSignals(True)
-        self.num_box.setValue(num)
-        self.num_box.blockSignals(False)
-
-        self.den_box.blockSignals(True)
-        self.den_box.setValue(den)
-        self.den_box.blockSignals(False)
-
         self.offset_box.blockSignals(True)
         self.offset_box.setValue(project_audio_offset)
         self.offset_box.blockSignals(False)
@@ -1333,10 +1328,7 @@ class MainWindow(QMainWindow):
         self._project_path = path
         self._mark_project_saved()
 
-    def change_tempo(self, value):
-        self.midi.set_base_tempo(value)
-        self.editor.bpm = value
-        self.editor.update()
+
 
     def undo(self):
         if not self.midi.undo():
@@ -1352,29 +1344,7 @@ class MainWindow(QMainWindow):
 
     def after_edit(self):
         self.refresh_track_combo()
-
-        self.tempo_box.blockSignals(True)
-        self.tempo_box.setValue(
-            int(
-                round(
-                    self.midi.bpm
-                )
-            )
-        )
-        self.tempo_box.blockSignals(False)
-
-        num, den = self.midi.time_sig_at(
-            0.0
-        )
-
-        self.num_box.blockSignals(True)
-        self.num_box.setValue(num)
-        self.num_box.blockSignals(False)
-
-        self.den_box.blockSignals(True)
-        self.den_box.setValue(den)
-        self.den_box.blockSignals(False)
-
+        self.editor.bpm = self.midi.bpm
         self.editor.selected_notes = []
 
         self.editor.update_timeline()
@@ -1392,74 +1362,83 @@ class MainWindow(QMainWindow):
         self.editor.update()
 
     def insert_tempo(self):
-        bpm = float(
-            self.tempo_box.value()
-        )
-
+        current_tempo = self.midi.tempo_at(self.editor.play_position)
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("テンポの追加")
+        layout = QVBoxLayout(dialog)
+        
+        hlayout = QHBoxLayout()
+        hlayout.addWidget(QLabel("新しいテンポ (BPM):"))
+        tempo_spin = QDoubleSpinBox()
+        tempo_spin.setRange(20.0, 999.0)
+        tempo_spin.setDecimals(1)
+        tempo_spin.setValue(current_tempo)
+        hlayout.addWidget(tempo_spin)
+        layout.addLayout(hlayout)
+        
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        layout.addWidget(buttons)
+        
+        # プレビュー用のテンポ変更をリアルタイムに反映するための一時退避
         self.midi.push_undo()
-
-        self.midi.add_tempo(
-            self.editor.play_position,
-            bpm
-        )
-
-        self.after_edit()
+        
+        def preview_tempo(val):
+            # 現在のUndoスタックをロールバックしてから再度追加する
+            self.midi.undo()
+            self.midi.push_undo()
+            self.midi.add_tempo(self.editor.play_position, val)
+            self.editor.bpm = self.midi.bpm
+            self.editor.update_timeline()
+            self.editor.update()
+            
+        tempo_spin.valueChanged.connect(preview_tempo)
+        
+        # 初期状態でもプレビューを適用する
+        preview_tempo(current_tempo)
+        
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        
+        if dialog.exec() == QDialog.Accepted:
+            self.after_edit()
+        else:
+            self.midi.undo()
+            self.editor.update_timeline()
+            self.editor.update()
 
     def insert_timesig(self):
-        num = self.num_box.value()
-        den = self.den_box.value()
-
-        self.midi.push_undo()
-
-        self.midi.add_time_signature(
-            self.editor.play_position,
-            num,
-            den
-        )
-
-        self.after_edit()
-
-    def new_midi(self):
-        self._analysis_token += 1
-        self._analysis_ready = False
-        self._analysis_error = None
-        self._project_path = None
-
-        self.midi = MidiData()
-
-        self.editor.set_midi(
-            self.midi
-        )
-
-        self.tempo_box.blockSignals(True)
-        self.tempo_box.setValue(
-            int(
-                round(
-                    self.midi.bpm
-                )
+        current_num, current_den = self.midi.time_sig_at(self.editor.play_position)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("拍子の追加")
+        layout = QVBoxLayout(dialog)
+        
+        hlayout = QHBoxLayout()
+        num_spin = QSpinBox()
+        num_spin.setRange(1, 32)
+        num_spin.setValue(current_num)
+        den_spin = QSpinBox()
+        den_spin.setRange(1, 32)
+        den_spin.setValue(current_den)
+        
+        hlayout.addWidget(num_spin)
+        hlayout.addWidget(QLabel("/"))
+        hlayout.addWidget(den_spin)
+        layout.addLayout(hlayout)
+        
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        
+        if dialog.exec() == QDialog.Accepted:
+            self.midi.push_undo()
+            self.midi.add_time_signature(
+                self.editor.play_position,
+                num_spin.value(),
+                den_spin.value()
             )
-        )
-        self.tempo_box.blockSignals(False)
-
-        num, den = self.midi.time_sig_at(
-            0.0
-        )
-
-        self.num_box.blockSignals(True)
-        self.num_box.setValue(num)
-        self.num_box.blockSignals(False)
-
-        self.den_box.blockSignals(True)
-        self.den_box.setValue(den)
-        self.den_box.blockSignals(False)
-
-        self.refresh_track_combo()
-
-        self.editor.set_track_filter(
-            0
-        )
-
-        self._mark_project_saved()
+            self.after_edit()
 
     def clear_audio(self):
         self._analysis_token += 1
@@ -1635,29 +1614,7 @@ class MainWindow(QMainWindow):
 
             self.midi.clear_history()
 
-            self.tempo_box.blockSignals(True)
 
-            self.tempo_box.setValue(
-                int(
-                    round(
-                        self.midi.bpm
-                    )
-                )
-            )
-
-            self.tempo_box.blockSignals(False)
-
-            num, den = self.midi.time_sig_at(
-                0.0
-            )
-
-            self.num_box.blockSignals(True)
-            self.num_box.setValue(num)
-            self.num_box.blockSignals(False)
-
-            self.den_box.blockSignals(True)
-            self.den_box.setValue(den)
-            self.den_box.blockSignals(False)
 
             self.editor.set_track_filter(
                 None
@@ -1681,25 +1638,44 @@ class MainWindow(QMainWindow):
             )
 
     def save_midi(self):
-        path, _ = QFileDialog.getSaveFileName(
+        path, selected_filter = QFileDialog.getSaveFileName(
             self,
-            "MIDIを保存",
+            "書き出しを保存",
             "",
-            "MIDI Files (*.mid *.midi)"
+            "MIDI Files (*.mid *.midi);;WAV Files (*.wav)"
         )
 
         if not path:
             return
 
         try:
-            self.midi.save(
-                path
-            )
+            if selected_filter == "WAV Files (*.wav)" or path.lower().endswith(".wav"):
+                if not path.lower().endswith(".wav"):
+                    path += ".wav"
+                    
+                # プログレスダイアログを表示してWAVエクスポート
+                progress = QProgressDialog("WAVファイルを出力中...", "キャンセル", 0, 0, self)
+                progress.setWindowTitle("書き出し")
+                progress.setWindowModality(Qt.WindowModal)
+                progress.setCancelButton(None)
+                progress.show()
+                QApplication.processEvents()
+                
+                self.audio.export_wav(path)
+                
+                progress.close()
+                QMessageBox.information(self, "完了", "WAVファイルの書き出しが完了しました。")
+            else:
+                if not path.lower().endswith((".mid", ".midi")):
+                    path += ".mid"
+                self.midi.save(path)
+                QMessageBox.information(self, "完了", "MIDIファイルの保存が完了しました。")
+                
         except Exception as e:
             QMessageBox.critical(
                 self,
                 "エラー",
-                str(e)
+                f"保存中にエラーが発生しました:\n{e}"
             )
 
     def update_editor(self):

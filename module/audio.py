@@ -4,7 +4,7 @@ import bisect
 import numpy as np
 import sounddevice as sd
 import librosa
-import midiout
+from . import midiout
 
 class AudioData:
     def __init__(self):
@@ -12,7 +12,7 @@ class AudioData:
         self.sr = 44100
         self.position = 0.0
         self.playing = False
-        self.paused = False
+        
         self._a4_freq = 440.0
 
         self._started_at = 0.0
@@ -27,9 +27,9 @@ class AudioData:
         self.midi_active = set()
 
         self._r_notes = []
-        self._r_order = []
+        
         self._r_starts = []
-        self._r_ends = []
+        
         self._r_max_dur = 0.0
 
         self._render_t = None
@@ -53,7 +53,7 @@ class AudioData:
             "trigger": 0
         }
         self._preview_thread = None
-        self._preview_stream = None
+        
         self._preview_stop_event = threading.Event()
 
         self._render_progress = 0.0
@@ -146,7 +146,7 @@ class AudioData:
         self.file_path = path
         self.position = 0.0
         self._start_position = 0.0
-        self.paused = False
+        
 
         return len(self.y) / self.sr
 
@@ -196,8 +196,10 @@ class AudioData:
         if self.playing:
             return
 
+        old_thread = getattr(self, "_thread", None)
+
         self.playing = True
-        self.paused = False
+        
         self.auto_stopped = False
 
         self._silence_preview()
@@ -212,13 +214,16 @@ class AudioData:
 
         self._thread = threading.Thread(
             target=self._play_worker,
-            args=(gen,),
+            args=(gen, old_thread),
             daemon=True
         )
 
         self._thread.start()
 
-    def _play_worker(self, gen):
+    def _play_worker(self, gen, old_thread=None):
+        if old_thread is not None and old_thread.is_alive() and old_thread != threading.current_thread():
+            old_thread.join(timeout=0.5)
+
         if gen != self._play_gen:
             return
 
@@ -237,32 +242,24 @@ class AudioData:
             else []
         )
 
-        order = sorted(
-            range(len(note_list)),
-            key=lambda i: note_list[i].start
-        )
+        short_notes = []
+        long_notes = []
+        max_short_duration = 0.0
+        
+        for n in note_list:
+            if n.duration > 8.0:
+                long_notes.append(n)
+            else:
+                short_notes.append(n)
+                if n.duration > max_short_duration:
+                    max_short_duration = n.duration
 
-        self._r_notes = note_list
-        self._r_order = order
-        self._r_starts = [
-            note_list[i].start
-            for i in order
-        ]
+        short_notes.sort(key=lambda n: n.start)
 
-        self._r_ends = [
-            note_list[i].start +
-            note_list[i].duration
-            for i in order
-        ]
-
-        self._r_max_dur = max(
-            (
-                self._r_ends[i] -
-                self._r_starts[i]
-                for i in range(len(order))
-            ),
-            default=0.0
-        )
+        self._r_notes = short_notes
+        self._r_starts = [n.start for n in short_notes]
+        self._r_max_dur = max_short_duration
+        self._r_long_notes = long_notes
 
         self._midi_cache_version += 1
         self._midi_cache_dirty = False
@@ -336,6 +333,28 @@ class AudioData:
 
         sample_position = 0
         local_version = self._midi_cache_version
+        
+        active_notes = {}
+        next_note_idx = 0
+        
+        def reset_active_notes(time_pos):
+            nonlocal next_note_idx
+            active_notes.clear()
+            self.midi_phase.clear()
+            
+            i0 = bisect.bisect_left(self._r_starts, time_pos - self._r_max_dur - 0.001)
+            next_note_idx = bisect.bisect_right(self._r_starts, time_pos)
+            
+            for i in range(i0, next_note_idx):
+                note = self._r_notes[i]
+                if note.start + note.duration > time_pos:
+                    active_notes[id(note)] = note
+                    
+            for note in self._r_long_notes:
+                if note.start <= time_pos and note.start + note.duration > time_pos:
+                    active_notes[id(note)] = note
+        
+        reset_active_notes(start_position)
 
         try:
             stream.start()
@@ -344,6 +363,18 @@ class AudioData:
                 self.playing and
                 sample_position < total_samples
             ):
+                if getattr(self, "_seek_request", None) is not None:
+                    new_pos = self._seek_request
+                    self._seek_request = None
+                    start_position = new_pos
+                    sample_position = 0
+                    self._start_position = new_pos
+                    self._started_at = time.perf_counter()
+                    self._render_progress = 0.0
+                    self._silence_midi_out()
+                    reset_active_notes(new_pos)
+                    continue
+
                 if self._midi_cache_dirty or local_version != self._midi_cache_version:
                     if self._midi_cache_dirty:
                         self._refresh_midi_cache()
@@ -395,10 +426,27 @@ class AudioData:
 
                 block *= self.volume
 
+                end_time = current_time + block_size / sample_rate
+                
+                while next_note_idx < len(self._r_starts) and self._r_starts[next_note_idx] < end_time:
+                    note = self._r_notes[next_note_idx]
+                    if note.start + note.duration > current_time:
+                        active_notes[id(note)] = note
+                    next_note_idx += 1
+                
+                to_remove = []
+                for note_id, note in active_notes.items():
+                    if note.start + note.duration <= current_time:
+                        to_remove.append(note_id)
+                        
+                for nid in to_remove:
+                    del active_notes[nid]
+
                 midi_block = self._render_midi(
                     current_time,
                     block_size,
-                    sample_rate
+                    sample_rate,
+                    active_notes
                 )
 
                 block += midi_block * 0.35
@@ -465,10 +513,7 @@ class AudioData:
             channel = getattr(note, 'channel', 0)
 
             events.append((
-                max(
-                    note_start,
-                    start_position
-                ) - start_position,
+                max(note_start, start_position) - start_position,
                 "on",
                 note.pitch,
                 note.velocity,
@@ -476,10 +521,7 @@ class AudioData:
             ))
 
             events.append((
-                max(
-                    note_end,
-                    start_position
-                ) - start_position,
+                max(0.0, max(note_end, start_position) - start_position - 0.001),
                 "off",
                 note.pitch,
                 0,
@@ -489,72 +531,64 @@ class AudioData:
         if self.midi is not None:
             if self.midi.filter_track is not None:
                 index = self.midi.filter_track
-
-                if 0 <= index < len(self.midi.tracks):
-                    tracks = [
-                        self.midi.tracks[index]
-                    ]
-                else:
-                    tracks = []
+                tracks = [self.midi.tracks[index]] if 0 <= index < len(self.midi.tracks) else []
             else:
                 tracks = self.midi.tracks
 
             pedals = []
-
             for track in tracks:
                 for pedal in track.pedals:
                     pedals.append((pedal, track.channel))
 
-            pedals.sort(
-                key=lambda e: e[0].time
-            )
-
-            state = False
-
+            pedals.sort(key=lambda e: e[0].time)
+            ch_state = {}
             for pedal, ch in pedals:
                 if pedal.time <= start_position:
-                    state = pedal.down
+                    ch_state[ch] = pedal.down
                 else:
                     break
 
-            if state:
-                events.append((
-                    0.0,
-                    "pedal",
-                    True,
-                    0,
-                    0
-                ))
+            for ch, st in ch_state.items():
+                if st:
+                    events.append((
+                        0.0,
+                        "pedal",
+                        True,
+                        0,
+                        ch
+                    ))
 
             for pedal, ch in pedals:
                 if pedal.time <= start_position + 1e-6:
                     continue
-
                 if pedal.time >= total_time:
                     continue
 
-                delay = 0.01 if pedal.down else 0.0
-                
+                adv = 0.001 if not pedal.down else 0.0
                 events.append((
-                    pedal.time - start_position + delay,
+                    max(0.0, pedal.time - start_position - adv),
                     "pedal",
                     pedal.down,
                     0,
                     ch
                 ))
 
-        events.sort(
-            key=lambda ev: (
-                ev[0],
-                0
-                if ev[1] == "off"
-                else (
-                    1
-                    if ev[1] == "on"
-                    else 2
-                )
-            )
-        )
+        def _sort_key(ev):
+            t = round(ev[0], 5)
+            kind = ev[1]
+            if kind == "off":
+                priority = 0
+            elif kind == "on":
+                priority = 1
+            elif kind == "pedal" and not ev[2]:
+                priority = 2
+            elif kind == "pedal" and ev[2]:
+                priority = 3
+            else:
+                priority = 4
+            return (t, priority)
+
+        events.sort(key=_sort_key)
 
         return events
 
@@ -622,6 +656,23 @@ class AudioData:
                 ):
                     return
 
+                if getattr(self, "_midi_out_seek_request", None) is not None:
+                    new_pos = self._midi_out_seek_request
+                    self._midi_out_seek_request = None
+                    start_position = new_pos
+                    song_base = new_pos
+                    wall_base = time.perf_counter() + latency
+                    if self._midi_out is not None and sounding:
+                        try:
+                            self._midi_out.all_notes_off()
+                        except Exception:
+                            pass
+                        sounding.clear()
+                    all_notes = self._r_notes + self._r_long_notes
+                    events = self._build_midi_events(all_notes, song_base, total_time)
+                    index = 0
+                    continue
+
                 if self._midi_cache_dirty or local_version != self._midi_cache_version:
                     now = time.perf_counter()
 
@@ -653,7 +704,7 @@ class AudioData:
                         sounding.clear()
 
                     events = self._build_midi_events(
-                        self._r_notes,
+                        self._r_notes + self._r_long_notes,
                         song_base,
                         total_time
                     )
@@ -666,42 +717,39 @@ class AudioData:
                     time.sleep(0.005)
                     continue
 
-                relative, kind, pitch, velocity, channel = events[index]
+                now = time.perf_counter()
+                
+                # 蜷後§繧ｿ繧､繝溘Φ繧ｰ・医∪縺溘・驕主悉・峨・繧､繝吶Φ繝医ｒ荳豌励↓騾∽ｿ｡縺吶ｋ
+                while index < len(events):
+                    relative, kind, pitch, velocity, channel = events[index]
+                    target = relative - (now - wall_base)
+                    
+                    if target > 0.0:
+                        break
 
-                target = relative - (
-                    time.perf_counter() - wall_base
-                )
+                    device = self._midi_out
+                    if device is None:
+                        return
 
-                if target > 0.0:
-                    time.sleep(min(
-                        0.002,
-                        target
-                    ))
+                    try:
+                        if kind == "on":
+                            device.note_on(pitch, velocity, channel)
+                            sounding.add((pitch, channel))
+                        elif kind == "pedal":
+                            device.control_change(64, 127 if pitch else 0, channel)
+                        else:
+                            device.note_off(pitch, channel)
+                            sounding.discard((pitch, channel))
+                    except Exception:
+                        pass
 
-                    continue
+                    index += 1
 
-                device = self._midi_out
-
-                if device is None:
-                    return
-
-                try:
-                    if kind == "on":
-                        device.note_on(pitch, velocity, channel)
-                        sounding.add((pitch, channel))
-                    elif kind == "pedal":
-                        device.control_change(
-                            64,
-                            127 if velocity else 0,
-                            channel
-                        )
-                    else:
-                        device.note_off(pitch, channel)
-                        sounding.discard((pitch, channel))
-                except Exception:
-                    pass
-
-                index += 1
+                if index < len(events):
+                    relative = events[index][0]
+                    target = relative - (time.perf_counter() - wall_base)
+                    if target > 0.0:
+                        time.sleep(min(0.002, target))
         finally:
             if self._midi_out is not None:
                 try:
@@ -709,7 +757,7 @@ class AudioData:
                 except Exception:
                     pass
 
-    def _render_midi(self, start_time, length, sample_rate):
+    def _render_midi(self, start_time, length, sample_rate, active_notes=None):
         output = np.zeros(
             length,
             dtype=np.float32
@@ -729,9 +777,6 @@ class AudioData:
             self.preview_pitch is None
         ):
             return output
-
-        notes = self._r_notes
-        order = self._r_order
 
         end_time = start_time + length / sample_rate
 
@@ -770,28 +815,11 @@ class AudioData:
         wave_buf = self._render_wave
         env_buf = self._render_env
 
-        if order and self._r_starts:
-            win_start = start_time - self._r_max_dur - 0.001
-
-            i0 = bisect.bisect_left(
-                self._r_starts,
-                win_start
-            )
-
-            i1 = bisect.bisect_right(
-                self._r_starts,
-                end_time
-            )
-
-            iterable = (
-                (
-                    order[k],
-                    notes[order[k]]
-                )
-                for k in range(i0, i1)
-            )
+        if active_notes is not None:
+            iterable = active_notes.items()
         else:
-            iterable = enumerate(notes)
+            # fallback for external calls if any
+            iterable = []
 
         attack_length = max(
             1,
@@ -1165,7 +1193,7 @@ class AudioData:
             except Exception:
                 return
 
-            self._preview_stream = stream
+            
 
             while not self._preview_stop_event.is_set():
                 if self.playing:
@@ -1184,7 +1212,7 @@ class AudioData:
             except Exception:
                 pass
 
-            self._preview_stream = None
+            
 
     def _preview_worker_midi(self):
         current_pitch = None
@@ -1256,23 +1284,17 @@ class AudioData:
         self.update_position()
 
         self.playing = False
-        self.paused = True
+        
 
         self._silence_midi_out()
-
         self._silence_preview()
 
     def stop(self):
         self.playing = False
-        self.paused = False
-
+        
         self._silence_midi_out()
-
         self._silence_preview()
-
-        self.position = (
-            self._start_position
-        )
+        self.position = self._start_position
         self.midi_phase.clear()
         self.midi_active.clear()
         self._midi_cache_dirty = True
@@ -1281,7 +1303,6 @@ class AudioData:
 
     def clear(self):
         self.stop()
-
         self.y = None
         self.sr = 44100
         self.offset = 0.0
@@ -1289,26 +1310,17 @@ class AudioData:
         self.file_path = None
 
     def seek(self, seconds):
-        was_playing = self.playing
-
-        if was_playing:
-            self.playing = False
-            self._silence_midi_out()
-
-        self.position = max(
-            0.0,
-            min(
-                seconds,
-                self.max_position()
-            )
-        )
+        new_pos = max(0.0, min(seconds, self.max_position()))
 
         self.preview_pitch = None
         self.preview_until = 0.0
         self._midi_out_preview_pitch = None
 
-        if was_playing:
-            self.play()
+        if self.playing:
+            self._seek_request = new_pos
+            self._midi_out_seek_request = new_pos
+        else:
+            self.position = new_pos
 
     def update_position(self):
         if not self.playing:
@@ -1342,3 +1354,60 @@ class AudioData:
 
         if self.position >= self.max_position():
             self.playing = False
+
+    def export_wav(self, path):
+        import scipy.io.wavfile as wavfile
+        import numpy as np
+
+        total_time = self.midi.max_extended_end()
+
+        sample_rate = self.sr
+        total_samples = int(total_time * sample_rate)
+
+        out_wave = np.zeros(total_samples, dtype=np.float32)
+
+        # 險ｭ螳壹・騾驕ｿ・亥・驛ｨ髻ｳ貅舌ｒ蠑ｷ蛻ｶ・・・繝医Λ繝・け蜃ｺ蜉幢ｼ・        old_midi_out = self._midi_out
+        old_filter = self.midi.filter_track
+        
+        try:
+            self._midi_out = None
+            self.midi.filter_track = None
+            self._refresh_midi_cache()
+            
+            block_size = 1024
+            active_notes = {}
+            next_note_idx = 0
+            
+            for i in range(0, total_samples, block_size):
+                current_time = i / sample_rate
+                n = min(block_size, total_samples - i)
+                end_time = current_time + n / sample_rate
+                
+                while next_note_idx < len(self._r_starts) and self._r_starts[next_note_idx] < end_time:
+                    note = self._r_notes[next_note_idx]
+                    if note.start + note.duration > current_time:
+                        active_notes[id(note)] = note
+                    next_note_idx += 1
+                
+                to_remove = []
+                for note_id, note in active_notes.items():
+                    if note.start + note.duration <= current_time:
+                        to_remove.append(note_id)
+                for nid in to_remove:
+                    del active_notes[nid]
+
+                midi_block = self._render_midi(current_time, n, sample_rate, active_notes)
+
+                out_wave[i:i+n] = midi_block * 0.35
+        finally:
+            self._midi_out = old_midi_out
+            self.midi.filter_track = old_filter
+            self._refresh_midi_cache()
+
+        peak = np.max(np.abs(out_wave))
+        if peak > 0.0:
+            if peak > 0.98:
+                out_wave /= (peak / 0.98)
+        
+        out_wave_16 = np.int16(out_wave * 32767)
+        wavfile.write(path, sample_rate, out_wave_16)

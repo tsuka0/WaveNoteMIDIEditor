@@ -2,10 +2,10 @@ import math
 import bisect
 import time
 import numpy as np
-from PySide6.QtWidgets import QWidget, QDialog, QSpinBox, QCheckBox, QLabel, QVBoxLayout, QHBoxLayout, QDialogButtonBox
+from PySide6.QtWidgets import QWidget, QDialog, QSpinBox, QDoubleSpinBox, QCheckBox, QLabel, QVBoxLayout, QHBoxLayout, QDialogButtonBox, QMenu
 from PySide6.QtCore import Qt, QPointF, QRectF, Signal
 from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont, QKeySequence, QImage, QPixmap
-from midi import PedalEvent
+from .midi import PedalEvent
 
 class PianoRoll(QWidget):
     marker_edited = Signal()
@@ -103,12 +103,15 @@ class PianoRoll(QWidget):
 
         self.drag_original_notes = None
 
+
         self.selected_notes = []
         self.clipboard_notes = []
+        self.clipboard_pedals = []
 
         self.selection_mode = False
         self.selection_start = None
         self.selection_end = None
+        self.selection_rect = None
 
         self.panning = False
         self.pan_start_x = 0.0
@@ -140,7 +143,6 @@ class PianoRoll(QWidget):
         self._notes_starts_version = -1
         self._note_pens = None
 
-        self.press_pos = None
         self.press_moved = False
 
         self.placement_beats = None
@@ -178,6 +180,7 @@ class PianoRoll(QWidget):
         self.bpm = midi.bpm
 
         self.selected_notes = []
+        self.selection_rect = None
         self.drag_note = None
         self.drag_mode = None
 
@@ -222,6 +225,80 @@ class PianoRoll(QWidget):
         )
 
         self.follow_play_position()
+
+    def split_notes_at_play_position(self):
+        target_time = self.play_position
+        target_notes = []
+
+        if self.selected_notes:
+            for note in self.selected_notes:
+                if note.start < target_time - 1e-5 and (note.start + note.duration) > target_time + 1e-5:
+                    target_notes.append(note)
+        else:
+            self._ensure_note_cache()
+
+            if self.midi.filter_track is None:
+                track_items = list(
+                    enumerate(self.midi.tracks)
+                )
+            else:
+                if 0 <= self.midi.filter_track < len(self.midi.tracks):
+                    track_items = [
+                        (self.midi.filter_track, self.midi.tracks[self.midi.filter_track])
+                    ]
+                else:
+                    track_items = []
+
+            for track_index, track in track_items:
+                starts, notes, _, long_notes, long_starts = (
+                    self._notes_starts_cache[
+                        track_index
+                    ]
+                )
+
+                i_end = bisect.bisect_left(
+                    starts,
+                    target_time
+                )
+
+                for note in notes[:i_end]:
+                    if (note.start + note.duration) > target_time + 1e-5:
+                        target_notes.append(note)
+
+                li_end = bisect.bisect_left(
+                    long_starts,
+                    target_time
+                )
+
+                for note in long_notes[:li_end]:
+                    if (note.start + note.duration) > target_time + 1e-5:
+                        target_notes.append(note)
+        
+        if not target_notes:
+            return
+            
+        self.midi.push_undo()
+        from midi import Note
+        
+        for note in target_notes:
+            original_duration = note.duration
+            note.duration = target_time - note.start
+            
+            new_note = Note(
+                start=target_time,
+                duration=original_duration - note.duration,
+                pitch=note.pitch,
+                velocity=note.velocity,
+                channel=getattr(note, "channel", 0)
+            )
+            
+            track_idx = self._note_track_map.get(id(note))
+            if track_idx is not None and 0 <= track_idx < len(self.midi.tracks):
+                self.midi.tracks[track_idx].notes.append(new_note)
+        
+        self.midi.sort()
+        self.midi._bump()
+        self.update()
 
     def update_timeline(self):
         self.audio_duration = max(
@@ -303,6 +380,9 @@ class PianoRoll(QWidget):
         self.midi.set_filter_track(
             track_index
         )
+
+        self.selected_notes = []
+        self.selection_rect = None
 
         self.audio.invalidate_midi_cache()
         self.update()
@@ -441,8 +521,10 @@ class PianoRoll(QWidget):
     def snap_time(
         self,
         value,
-        grid=None
+        grid=None,
+        mode="round"
     ):
+        import math
         if grid is None:
             grid = self.note_length
             
@@ -453,10 +535,10 @@ class PianoRoll(QWidget):
             )
         )
 
-        snapped = round(
-            beat /
-            grid
-        ) * grid
+        if mode == "floor":
+            snapped = math.floor(beat / grid) * grid
+        else:
+            snapped = round(beat / grid) * grid
 
         return max(
             0.0,
@@ -763,6 +845,7 @@ class PianoRoll(QWidget):
                 self.selected_notes = []
                 for track in self.midi.tracks:
                     self.selected_notes.extend(track.notes)
+            self.selection_rect = None
             self.update()
             event.accept()
             return
@@ -805,6 +888,9 @@ class PianoRoll(QWidget):
         self,
         event
     ):
+        if self.audio.playing:
+            return
+
         shift = bool(
             event.modifiers() &
             Qt.ShiftModifier
@@ -880,25 +966,29 @@ class PianoRoll(QWidget):
         is_duplicate = False
         track_index = self.midi.active_track()
         track = self.midi.tracks[track_index]
+
+        pitch_groups = {}
+        for other in track.notes:
+            pitch_groups.setdefault(
+                other.pitch, []
+            ).append(other)
         
         for n in self.selected_notes:
             new_end = n.start + n.duration
-            for other in track.notes:
-                if other in self.selected_notes:
+            for other in pitch_groups.get(n.pitch, []):
+                if other is n:
                     continue
-                if other.pitch == n.pitch:
-                    other_end = other.start + other.duration
-                    if not (new_end <= other.start + 1e-6 or n.start >= other_end - 1e-6):
-                        is_duplicate = True
-                        break
+                other_end = other.start + other.duration
+                if not (new_end <= other.start + 1e-6 or n.start >= other_end - 1e-6):
+                    is_duplicate = True
+                    break
             if is_duplicate:
                 break
                 
         if is_duplicate:
             self.midi.undo()
-            # undoしたことでself.selected_notesの参照が古くなるため、クリアするか新しく見つける必要がある
-            # ここでは安全のために選択を解除する
             self.selected_notes = []
+            self.selection_rect = None
             self.update()
             return
 
@@ -1094,38 +1184,175 @@ class PianoRoll(QWidget):
         )
 
         if event.button() == Qt.RightButton:
+            if self.audio.playing:
+                return
+
             note = self.note_at(x, y)
 
             if note is None and y >= lane_top and y < lane_top + self.velocity_lane_height:
-                bar = self._velocity_bar_at(x)
-                if bar is not None:
-                    note = bar[0]
-                    self._set_velocity_dialog(note)
-                    return
-                else:
-                    self._vel_press(event, x, y)
-                    return
-
-            if note is not None:
-                self._set_velocity_dialog(note)
+                self._vel_press(event, x, y)
                 return
 
+            pedal_hit = None
+            if note is None and y >= lane_top + self.velocity_lane_height and y < lane_top + self.velocity_lane_height + self.pedal_lane_height:
+                events = self.midi.tracks[self.midi.active_track()].pedals
+                pedal_hit = self._pedal_event_at(events, x)
+
+            if pedal_hit is not None:
+                self.last_selection_time_range = (pedal_hit.time - 0.001, pedal_hit.time + 0.001)
+                self.last_selection_in_pedal = True
+                self.selected_notes = []
+                self.selection_rect = None
+                self.update()
+
+                menu = QMenu(self)
+                copy_action = menu.addAction("コピー")
+                cut_action = menu.addAction("切り取り")
+                delete_action = menu.addAction("削除")
+
+                action = menu.exec(event.globalPosition().toPoint())
+
+                if action:
+                    if action == copy_action:
+                        self.copy_selected()
+                    elif action == cut_action:
+                        self.cut_selected()
+                    elif action == delete_action:
+                        self.delete_selected()
+
+                    self._clear_selection()
+                    self.update()
+                return
+
+            if note is not None:
+                if note not in self.selected_notes:
+                    self.selected_notes = [note]
+                    self.selection_rect = None
+                    self.update()
+
+                menu = QMenu(self)
+
+                sel_notes = self.selected_notes
+
+                vel_action = None
+                if len(sel_notes) >= 1:
+                    vel_action = menu.addAction("ベロシティを設定")
+
+                merge_action = None
+                if len(sel_notes) >= 2:
+                    merge_action = menu.addAction("ノーツを結合")
+
+                menu.addSeparator()
+                copy_action = menu.addAction("コピー")
+                cut_action = menu.addAction("切り取り")
+                delete_action = menu.addAction("削除")
+
+                action = menu.exec(event.globalPosition().toPoint())
+
+                if action:
+                    if vel_action and action == vel_action:
+                        self._set_velocity_dialog(sel_notes[0])
+                    elif merge_action and action == merge_action:
+                        self._merge_notes(sel_notes)
+                    elif action == copy_action:
+                        self.copy_selected()
+                    elif action == cut_action:
+                        self.cut_selected()
+                    elif action == delete_action:
+                        self.delete_selected()
+
+                    self.selected_notes = []
+                    self.selection_rect = None
+                    self.last_selection_time_range = None
+                    self.last_selection_in_pedal = False
+                    self.update()
+
+                return
+
+            if self.selection_rect is not None:
+                rt1, rt2, rp1, rp2 = self.selection_rect[:4]
+                r_in_lane = self.selection_rect[4] if len(self.selection_rect) > 4 else False
+                r_in_pedal = self.selection_rect[5] if len(self.selection_rect) > 5 else False
+                click_time = self.x_to_time(x)
+                if r_in_lane:
+                    if r_in_pedal:
+                        in_rect = (rt1 <= click_time <= rt2) and (y >= lane_top + self.velocity_lane_height)
+                    else:
+                        in_rect = (rt1 <= click_time <= rt2) and (lane_top <= y < lane_top + self.velocity_lane_height)
+                else:
+                    click_pitch = self.y_to_pitch(y)
+                    in_rect = (
+                        rt1 <= click_time <= rt2 and
+                        rp1 <= click_pitch <= rp2 and
+                        y < lane_top
+                    )
+
+                if in_rect:
+                    menu = QMenu(self)
+
+                    sel_notes = self.selected_notes
+
+                    vel_action = None
+                    if len(sel_notes) >= 1:
+                        vel_action = menu.addAction("ベロシティを設定")
+
+                    merge_action = None
+                    if len(sel_notes) >= 2:
+                        merge_action = menu.addAction("ノーツを結合")
+
+                    menu.addSeparator()
+                    copy_action = menu.addAction("コピー")
+                    cut_action = menu.addAction("切り取り")
+                    delete_action = menu.addAction("削除")
+
+                    action = menu.exec(event.globalPosition().toPoint())
+
+                    if action:
+                        if vel_action and action == vel_action:
+                            self._set_velocity_dialog(sel_notes[0])
+                        elif merge_action and action == merge_action:
+                            self._merge_notes(sel_notes)
+                        elif action == copy_action:
+                            self.copy_selected()
+                        elif action == cut_action:
+                            self.cut_selected()
+                        elif action == delete_action:
+                            self.delete_selected()
+
+                        self.selected_notes = []
+                        self.selection_rect = None
+                        self.last_selection_time_range = None
+                        self.last_selection_in_pedal = False
+                        self.update()
+
+                    return
+                else:
+                    self.selected_notes = []
+                    self.selection_rect = None
+                    self.last_selection_time_range = None
+                    self.last_selection_in_pedal = False
+                    self.update()
+
+
             self.selection_mode = True
+            self.selection_rect = None
             
             if y >= lane_top + self.velocity_lane_height:
-                self.selection_start = (self.x_to_time(x), self.min_pitch)
-                self.selection_end = (self.x_to_time(x), self.max_pitch)
+                self.selection_start = (self.snap_time(self.x_to_time(x), mode="floor"), self.min_pitch)
+                self.selection_end = self.selection_start
                 self.selection_in_lane = True
                 self.selection_in_pedal = True
             else:
                 self.selection_start = (
-                    self.x_to_time(x),
+                    self.snap_time(self.x_to_time(x), mode="floor"),
                     self.y_to_pitch(y)
                 )
                 self.selection_end = self.selection_start
                 self.selection_in_lane = False
                 self.selection_in_pedal = False
 
+            self.audio.seek(self.selection_start[0])
+            self.set_play_position(self.selection_start[0])
             self.update()
             return
 
@@ -1133,6 +1360,9 @@ class PianoRoll(QWidget):
             y >= lane_top and
             event.button() == Qt.LeftButton
         ):
+            if self.audio.playing:
+                return
+
             if (
                 y <
                 lane_top +
@@ -1214,12 +1444,40 @@ class PianoRoll(QWidget):
 
             return
 
+
+        in_rect, on_right_edge, _ = self._click_in_selection_rect(x, y)
+        if in_rect and self.selected_notes and not getattr(self, "selection_in_lane", False) and not getattr(self, "selection_in_pedal", False):
+            if self.audio.playing:
+                return
+            self.midi.push_undo()
+            self.drag_start = QPointF(x, y)
+            self.press_moved = False
+            self.selection_rect = None
+            if on_right_edge:
+                self.drag_mode = "resize"
+            else:
+                self.drag_mode = "move"
+            self.drag_original_notes = [
+                (n, n.start, n.pitch, n.duration)
+                for n in self.selected_notes
+            ]
+            note_under_cursor = self.note_at(x, y)
+            first = note_under_cursor if (note_under_cursor and note_under_cursor in self.selected_notes) else self.selected_notes[0]
+            
+            self.drag_note = first
+            self.drag_track_index = self._note_track_index(first)
+            self.drag_original = (first.start, first.duration, first.pitch)
+            self.update()
+            return
+
         note = self.note_at(
             x,
             y
         )
 
         if note:
+            if self.audio.playing:
+                return
             self.midi.push_undo()
 
             self.drag_note = note
@@ -1229,11 +1487,6 @@ class PianoRoll(QWidget):
             )
 
             self.drag_start = QPointF(
-                x,
-                y
-            )
-
-            self.press_pos = (
                 x,
                 y
             )
@@ -1276,16 +1529,19 @@ class PianoRoll(QWidget):
                 self.drag_original_notes = None
 
             if note not in self.selected_notes:
-                self.selected_notes = [
-                    note
-                ]
+                self._clear_selection()
+                self.selected_notes = [note]
 
             self.update()
 
             return
 
+        if self.midi.filter_track is None or self.audio.playing:
+            return
+
         start = self.snap_time(
-            self.x_to_time(x)
+            self.x_to_time(x),
+            mode="floor"
         )
 
         pitch = self.y_to_pitch(
@@ -1293,6 +1549,7 @@ class PianoRoll(QWidget):
         )
 
         self.midi.push_undo()
+        self._clear_selection()
 
         note = self.midi.add_note(
             start,
@@ -1307,10 +1564,6 @@ class PianoRoll(QWidget):
         if self.audio.playing:
             self.audio.invalidate_midi_cache()
 
-        self.selected_notes = [
-            note
-        ]
-
         self.drag_note = note
         self.drag_track_index = (
             self.midi.active_track()
@@ -1324,10 +1577,6 @@ class PianoRoll(QWidget):
             note.start,
             note.duration,
             note.pitch
-        )
-        self.press_pos = (
-            x,
-            y
         )
         self.press_moved = False
 
@@ -1357,6 +1606,10 @@ class PianoRoll(QWidget):
                 self.height() -
                 self.bottom_height
             )
+
+            if self.audio.playing and y >= self.top_height and y < self.height() - self.scrub_height:
+                event.accept()
+                return
 
             if y >= lane_top:
                 if (
@@ -1389,26 +1642,20 @@ class PianoRoll(QWidget):
                 super().mouseDoubleClickEvent(event)
                 return
 
-            note = self.note_at(
-                x,
-                y
-            )
+            note = self.note_at(x, y)
 
             if note:
                 self.midi.push_undo()
 
-                self.midi.remove_note(
-                    note
-                )
+                self.midi.remove_note(note)
 
                 self.selected_notes = [
-                    n for n in
-                    self.selected_notes
+                    n for n in self.selected_notes
                     if n != note
                 ]
+                self.selection_rect = None
 
                 self.update()
-
                 event.accept()
                 return
 
@@ -1489,10 +1736,11 @@ class PianoRoll(QWidget):
         )
         layout.addWidget(pos_label)
 
-        spin = QSpinBox()
-        spin.setRange(20, 999)
+        spin = QDoubleSpinBox()
+        spin.setRange(20.0, 999.0)
+        spin.setDecimals(1)
         spin.setSuffix(" BPM")
-        spin.setValue(int(round(bpm)))
+        spin.setValue(bpm)
         layout.addWidget(spin)
 
         del_check = QCheckBox(
@@ -1511,21 +1759,46 @@ class PianoRoll(QWidget):
             QDialogButtonBox.Ok |
             QDialogButtonBox.Cancel
         )
-        buttons.accepted.connect(dlg.accept)
-        buttons.rejected.connect(dlg.reject)
         layout.addWidget(buttons)
 
-        if dlg.exec() != QDialog.Accepted:
-            return
-
+        # プレビュー用のテンポ変更をリアルタイムに反映するための一時退避
         self.midi.push_undo()
 
-        if del_check.isChecked():
-            self.midi.remove_tempo(t_sec)
-        else:
-            self.midi.add_tempo(t_sec, spin.value())
+        def preview_tempo(val):
+            if del_check.isChecked():
+                return # 削除チェック時はプレビュー更新しない
+            
+            self.midi.undo()
+            self.midi.push_undo()
+            self.midi.add_tempo(t_sec, val)
+            self.bpm = self.midi.bpm
+            self.update_timeline()
+            self.update()
 
-        self._after_marker_edit()
+        spin.valueChanged.connect(preview_tempo)
+
+        def preview_delete(checked):
+            self.midi.undo()
+            self.midi.push_undo()
+            if checked:
+                self.midi.remove_tempo(t_sec)
+            else:
+                self.midi.add_tempo(t_sec, spin.value())
+            self.bpm = self.midi.bpm
+            self.update_timeline()
+            self.update()
+            
+        del_check.toggled.connect(preview_delete)
+
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+
+        if dlg.exec() == QDialog.Accepted:
+            self._after_marker_edit()
+        else:
+            self.midi.undo()
+            self.update_timeline()
+            self.update()
 
     def _edit_timesig_marker(self, marker):
         t_sec, num, den = marker
@@ -1641,7 +1914,7 @@ class PianoRoll(QWidget):
                 if self.selection_mode and self.selection_start:
                     lane_top = self.height() - self.bottom_height
                     self.selection_end = (
-                        self.x_to_time(x),
+                        self.snap_time(self.x_to_time(x)),
                         self.y_to_pitch(y) if y < lane_top else self.min_pitch
                     )
                 elif self.drag_note is not None:
@@ -1732,7 +2005,7 @@ class PianoRoll(QWidget):
             if self.selection_start:
                 lane_top = self.height() - self.bottom_height
                 self.selection_end = (
-                    self.x_to_time(x),
+                    self.snap_time(self.x_to_time(x)),
                     self.y_to_pitch(y) if y < lane_top else self.min_pitch
                 )
                 self.update()
@@ -1767,6 +2040,10 @@ class PianoRoll(QWidget):
         original_pitch = (
             self.drag_original[2]
         )
+
+        time_diff = 0.0
+        pitch_diff = 0
+        diff_duration = 0.0
 
         if self.drag_mode == "move":
             if (
@@ -1912,30 +2189,36 @@ class PianoRoll(QWidget):
 
         if self.drag_note is not None:
             is_duplicate = False
-            track = self.midi.tracks[self.drag_track_index]
+            self._ensure_note_cache()
             notes_to_check = self.selected_notes if self.drag_original_notes else [self.drag_note]
+            exclude_set = set(id(n) for n in notes_to_check)
             
             for n in notes_to_check:
+                n_track_idx = self._note_track_index(n)
+                if n_track_idx is None:
+                    continue
                 new_end = n.start + n.duration
-                for other in track.notes:
-                    if other in notes_to_check:
-                        continue
-                    if other.pitch == n.pitch:
-                        other_end = other.start + other.duration
-                        if not (new_end <= other.start + 1e-6 or n.start >= other_end - 1e-6):
-                            is_duplicate = True
-                            break
-                if is_duplicate:
+                if self._has_overlap_in_track_exclude(
+                    n_track_idx,
+                    exclude_set,
+                    n.start,
+                    new_end,
+                    n.pitch
+                ):
+                    is_duplicate = True
                     break
                     
             if is_duplicate:
                 self.midi.undo()
-                self.selected_notes = []
+                self._clear_selection()
                 self.update()
             else:
                 self.midi._bump()
                 if self.audio.playing:
                     self.audio.invalidate_midi_cache()
+            
+            # 操作が終わったら選択状態を消す
+            self._clear_selection()
 
         self.drag_note = None
         self.drag_mode = None
@@ -1943,7 +2226,6 @@ class PianoRoll(QWidget):
         self.drag_original = None
         self.drag_track_index = 0
         self.drag_original_notes = None
-        self.press_pos = None
         self.press_moved = False
         self._previewed_pitch = None
         self._nudge_undo_pushed = False
@@ -2046,6 +2328,14 @@ class PianoRoll(QWidget):
                     )
             return
 
+        in_rect, on_right_edge, _ = self._click_in_selection_rect(x, y)
+        if in_rect and self.selected_notes and not getattr(self, "selection_in_lane", False) and not getattr(self, "selection_in_pedal", False):
+            if on_right_edge:
+                self.setCursor(Qt.SizeHorCursor)
+            else:
+                self.setCursor(Qt.SizeAllCursor)
+            return
+
         note = self.note_at(
             x,
             y
@@ -2081,6 +2371,12 @@ class PianoRoll(QWidget):
 
         super().leaveEvent(event)
 
+    def _clear_selection(self):
+        self.selected_notes = []
+        self.selection_rect = None
+        self.last_selection_time_range = None
+        self.last_selection_in_pedal = False
+
     def finish_selection(self):
         if not self.selection_start or not self.selection_end:
             return
@@ -2106,22 +2402,84 @@ class PianoRoll(QWidget):
         )
 
         if getattr(self, "selection_in_pedal", False):
-            self.selected_notes = []
+            self._clear_selection()
+            has_pedal_events = False
+            if self.midi.filter_track is not None:
+                if 0 <= self.midi.filter_track < len(self.midi.tracks):
+                    for ev in self.midi.tracks[self.midi.filter_track].pedals:
+                        if t1 <= ev.time <= t2:
+                            has_pedal_events = True
+                            break
+            else:
+                for track in self.midi.tracks:
+                    for ev in track.pedals:
+                        if t1 <= ev.time <= t2:
+                            has_pedal_events = True
+                            break
+                    if has_pedal_events:
+                        break
         else:
-            self.selected_notes = [
-                note
-                for note in self.midi.visible_notes()
-                if (
-                    note.start <
-                    t2 and
-                    note.start +
-                    note.duration >
-                    t1 and
-                    p1 <=
-                    note.pitch <=
-                    p2
+            self._ensure_note_cache()
+            result = []
+
+            if self.midi.filter_track is None:
+                track_items = list(
+                    enumerate(self.midi.tracks)
                 )
-            ]
+            else:
+                index = self.midi.filter_track
+                if 0 <= index < len(self.midi.tracks):
+                    track_items = [
+                        (index, self.midi.tracks[index])
+                    ]
+                else:
+                    track_items = []
+
+            for track_index, track in track_items:
+                starts, notes, _, long_notes, long_starts = (
+                    self._notes_starts_cache[
+                        track_index
+                    ]
+                )
+
+                i1 = bisect.bisect_left(
+                    starts,
+                    t2
+                )
+
+                for note in notes[:i1]:
+                    if (
+                        note.start +
+                        note.duration >
+                        t1 and
+                        p1 <=
+                        note.pitch <=
+                        p2
+                    ):
+                        result.append(note)
+
+                li1 = bisect.bisect_left(
+                    long_starts,
+                    t2
+                )
+
+                for note in long_notes[:li1]:
+                    if (
+                        note.start +
+                        note.duration >
+                        t1 and
+                        p1 <=
+                        note.pitch <=
+                        p2
+                    ):
+                        result.append(note)
+
+            self.selected_notes = result
+
+        if getattr(self, "selection_in_pedal", False):
+            cancel = not has_pedal_events
+        else:
+            cancel = not self.selected_notes
 
         self.last_selection_time_range = (t1, t2)
         self.last_selection_in_pedal = getattr(self, "selection_in_pedal", False)
@@ -2130,25 +2488,72 @@ class PianoRoll(QWidget):
         self.selection_start = None
         self.selection_end = None
 
+        if cancel:
+            self.selection_rect = None
+        else:
+            in_lane = getattr(self, "selection_in_lane", False)
+            in_pedal = getattr(self, "selection_in_pedal", False)
+            self.selection_rect = (t1, t2, p1, p2, in_lane, in_pedal)
+
+        self.update()
+
+    def select_all(self):
+        self._clear_selection()
+        
+        self.selection_in_lane = False
+        self.selection_in_pedal = False
+
+        notes = []
+        if self.midi.filter_track is None:
+            for track in self.midi.tracks:
+                notes.extend(track.notes)
+        else:
+            if 0 <= self.midi.filter_track < len(self.midi.tracks):
+                notes.extend(self.midi.tracks[self.midi.filter_track].notes)
+
+        if not notes:
+            return
+
+        self.selected_notes = list(notes)
+
+        t1 = min(n.start for n in notes)
+        t2 = max(n.start + n.duration for n in notes)
+        p1 = min(n.pitch for n in notes)
+        p2 = max(n.pitch for n in notes)
+
+        # 範囲選択の四角枠 (t1, t2, p1, p2, in_lane, in_pedal)
+        self.selection_rect = (t1, t2, p1, p2, False, False)
+        
         self.update()
 
     def copy_selected(self):
-        if not self.selected_notes:
-            return
-
-        self.clipboard_notes = (
-            self.midi.copy_notes(
-                self.selected_notes
-            )
-        )
+        if getattr(self, "last_selection_in_pedal", False):
+            if not self.last_selection_time_range:
+                return
+            t1, t2 = self.last_selection_time_range
+            track_idx = self.midi.active_track()
+            events = self.midi.tracks[track_idx].pedals
+            selected_pedals = [ev for ev in events if t1 <= ev.time <= t2]
+            if not selected_pedals:
+                return
+            self.clipboard_pedals = self.midi.copy_pedals(selected_pedals)
+            self.clipboard_notes = []
+        else:
+            if not self.selected_notes:
+                return
+            self.clipboard_notes = self.midi.copy_notes(self.selected_notes)
+            self.clipboard_pedals = []
 
     def cut_selected(self):
+        self.midi.push_undo()
+        self.copy_selected()
+
+        if getattr(self, "last_selection_in_pedal", False):
+            self.delete_selected()
+            return
+        
         if not self.selected_notes:
             return
-
-        self.midi.push_undo()
-
-        self.copy_selected()
 
         for note in list(
             self.selected_notes
@@ -2161,11 +2566,12 @@ class PianoRoll(QWidget):
             self.audio.invalidate_midi_cache()
 
         self.selected_notes = []
+        self.selection_rect = None
 
         self.update()
 
     def paste_notes(self):
-        if not self.clipboard_notes:
+        if not self.clipboard_notes and not self.clipboard_pedals:
             return
 
         self.midi.push_undo()
@@ -2174,18 +2580,32 @@ class PianoRoll(QWidget):
             self.play_position
         )
 
-        created = (
-            self.midi.paste_notes(
-                self.clipboard_notes,
+        if self.clipboard_notes:
+            created = (
+                self.midi.paste_notes(
+                    self.clipboard_notes,
+                    start_time
+                )
+            )
+            self.selected_notes = created
+            self.last_selection_time_range = None
+            self.last_selection_in_pedal = False
+        else:
+            created_pedals = self.midi.paste_pedals(
+                self.clipboard_pedals,
                 start_time
             )
-        )
+            if created_pedals:
+                t1 = min(p.time for p in created_pedals)
+                t2 = max(p.time for p in created_pedals)
+                self.last_selection_time_range = (t1, t2)
+                self.last_selection_in_pedal = True
+                self.selected_notes = []
 
         if self.audio.playing:
             self.audio.invalidate_midi_cache()
 
-        self.selected_notes = created
-
+        self.selection_rect = None
         self.update()
 
     def delete_selected(self):
@@ -2221,6 +2641,7 @@ class PianoRoll(QWidget):
             self.audio.invalidate_midi_cache()
 
         self.selected_notes = []
+        self.selection_rect = None
 
         self.update()
 
@@ -2228,39 +2649,95 @@ class PianoRoll(QWidget):
         self,
         note
     ):
-        for track_index, track in enumerate(
-            self.midi.tracks
-        ):
-            if note in track.notes:
-                return track_index
-
+        self._ensure_note_cache()
+        idx = self._note_track_map.get(id(note))
+        if idx is not None:
+            return idx
         return self.midi.active_track()
+
+    def _has_overlap_in_track_exclude(
+        self,
+        track_index,
+        exclude_set,
+        check_start,
+        check_end,
+        check_pitch
+    ):
+        if track_index < 0 or track_index >= len(self.midi.tracks):
+            return False
+            
+        track = self.midi.tracks[track_index]
+        for other in track.notes:
+            if id(other) in exclude_set:
+                continue
+            if other.pitch != check_pitch:
+                continue
+            
+            other_end = other.start + other.duration
+            if (
+                check_end > other.start + 1e-6 and
+                check_start < other_end - 1e-6
+            ):
+                return True
+                
+        return False
+
+    def _click_in_selection_rect(self, x, y):
+        if self.selection_rect is None:
+            return False, False, False
+        rt1, rt2, rp1, rp2 = self.selection_rect[:4]
+        r_in_lane = self.selection_rect[4] if len(self.selection_rect) > 4 else False
+        r_in_pedal = self.selection_rect[5] if len(self.selection_rect) > 5 else False
+        click_time = self.x_to_time(x)
+        if r_in_lane:
+            in_rect = rt1 <= click_time <= rt2
+        else:
+            click_pitch = self.y_to_pitch(y)
+            in_rect = (
+                rt1 <= click_time <= rt2 and
+                rp1 <= click_pitch <= rp2
+            )
+        if not in_rect:
+            return False, False, False
+        rect_end_x = self.time_to_x(rt2)
+        on_right_edge = abs(x - rect_end_x) <= 8
+        return True, on_right_edge, False
 
     def note_at(
         self,
         x,
         y
     ):
-        pitch = self.y_to_pitch(
-            y
-        )
+        pitch = self.y_to_pitch(y)
+        time = self.x_to_time(x)
 
-        time = self.x_to_time(
-            x
-        )
+        self._ensure_note_cache()
+        
+        if self.midi.filter_track is None:
+            track_items = reversed(list(enumerate(self.midi.tracks)))
+        else:
+            index = self.midi.filter_track
+            if 0 <= index < len(self.midi.tracks):
+                track_items = [(index, self.midi.tracks[index])]
+            else:
+                track_items = []
+                
+        for track_index, track in track_items:
+            starts, notes, max_duration, long_notes, long_starts = self._notes_starts_cache[track_index]
+            
+            i_end = bisect.bisect_right(starts, time)
+            i_start = bisect.bisect_left(starts, time - max_duration - 0.001)
+            
+            for note in reversed(notes[i_start:i_end]):
+                if note.pitch == pitch and note.start <= time <= note.start + note.duration:
+                    return note
 
-        for note in reversed(
-            self.midi.visible_notes()
-        ):
-            if (
-                note.pitch ==
-                pitch and
-                note.start <=
-                time <=
-                note.start +
-                note.duration
-            ):
-                return note
+            li_end = bisect.bisect_right(long_starts, time)
+            li_start = bisect.bisect_left(long_starts, time - max_duration - 0.001)
+
+            for note in reversed(long_notes[li_start:li_end]):
+                if note.pitch == pitch and note.start <= time <= note.start + note.duration:
+                    return note
 
         return None
 
@@ -2276,67 +2753,50 @@ class PianoRoll(QWidget):
 
     def _velocity_bars(self):
         bars = []
+        self._ensure_note_cache()
 
-        if self.midi.filter_track is not None:
-            track_index = self.midi.filter_track
+        visible_start = max(0.0, self.scroll_x)
+        visible_end = self.x_to_time(self.width())
 
-            if 0 <= track_index < len(self.midi.tracks):
-                for note in self.midi.tracks[track_index].notes:
-                    x = self.time_to_x(
-                        note.start
-                    )
-
-                    width = min(
-                        max(
-                            3,
-                            int(
-                                note.duration /
-                                self.seconds_per_pixel
-                            )
-                        ),
-                        12
-                    )
-
-                    if (
-                        x + width <
-                        self.left_width or
-                        x > self.width()
-                    ):
-                        continue
-
-                    bars.append(
-                        (note, x, width, track_index)
-                    )
+        if self.midi.filter_track is None:
+            track_items = list(enumerate(self.midi.tracks))
         else:
-            for track_index, track in enumerate(
-                self.midi.tracks
-            ):
-                for note in track.notes:
-                    x = self.time_to_x(
-                        note.start
-                    )
+            index = self.midi.filter_track
+            if 0 <= index < len(self.midi.tracks):
+                track_items = [(index, self.midi.tracks[index])]
+            else:
+                track_items = []
 
-                    width = min(
-                        max(
-                            3,
-                            int(
-                                note.duration /
-                                self.seconds_per_pixel
-                            )
-                        ),
-                        12
-                    )
+        for track_index, track in track_items:
+            starts, notes, max_duration, long_notes, long_starts = self._notes_starts_cache[track_index]
 
-                    if (
-                        x + width <
-                        self.left_width or
-                        x > self.width()
-                    ):
-                        continue
+            margin = max_duration + 0.001
+            win_start = visible_start - margin
+            win_end = visible_end + margin
 
-                    bars.append(
-                        (note, x, width, track_index)
-                    )
+            i0 = bisect.bisect_left(starts, win_start)
+            i1 = bisect.bisect_right(starts, win_end)
+
+            li0 = bisect.bisect_left(long_starts, win_start)
+            li1 = bisect.bisect_right(long_starts, win_end)
+
+            for note in notes[i0:i1]:
+                x = self.time_to_x(note.start)
+                width = min(max(3, int(note.duration / self.seconds_per_pixel)), 12)
+
+                if x + width < self.left_width or x > self.width():
+                    continue
+
+                bars.append((note, x, width, track_index))
+
+            for note in long_notes[li0:li1]:
+                x = self.time_to_x(note.start)
+                width = min(max(3, int(note.duration / self.seconds_per_pixel)), 12)
+
+                if x + width < self.left_width or x > self.width():
+                    continue
+
+                bars.append((note, x, width, track_index))
 
         return bars
 
@@ -2590,6 +3050,67 @@ class PianoRoll(QWidget):
 
         self.update()
 
+    def _merge_notes(self, notes):
+        if len(notes) < 2:
+            return
+
+        groups = {}
+        for note in notes:
+            track_idx = self._note_track_index(note)
+            key = (track_idx, note.pitch)
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(note)
+
+        # 結合可能なグループ（同じピッチが2つ以上）があるか確認
+        has_mergeable = False
+        for group in groups.values():
+            if len(group) >= 2:
+                has_mergeable = True
+                break
+                
+        if not has_mergeable:
+            return
+
+        self.midi.push_undo()
+        from midi import Note
+        
+        for (track_idx, pitch), group in groups.items():
+            if len(group) < 2:
+                continue
+
+            track = self.midi.tracks[track_idx]
+            
+            group.sort(key=lambda n: n.start)
+            start_time = group[0].start
+            end_time = max(n.start + n.duration for n in group)
+            velocity = group[0].velocity
+            ch = getattr(group[0], "channel", 0)
+
+            for note in group:
+                if note in track.notes:
+                    track.notes.remove(note)
+                if note in self.selected_notes:
+                    self.selected_notes.remove(note)
+
+            new_note = Note(
+                start=start_time,
+                duration=end_time - start_time,
+                pitch=pitch,
+                velocity=velocity,
+                channel=ch
+            )
+            track.notes.append(new_note)
+            self.selected_notes.append(new_note)
+
+        self.midi.sort()
+        self.midi._bump()
+        
+        if self.audio.playing:
+            self.audio.invalidate_midi_cache()
+            
+        self.update()
+
     def _vel_double_click(self, x, y):
         bar = self._velocity_bar_at(x)
 
@@ -2604,7 +3125,16 @@ class PianoRoll(QWidget):
         best = None
         best_d = None
 
-        for ev in events:
+        t = self.x_to_time(x)
+        times = [e.time for e in events]
+        # x-6 から x+6 の範囲
+        t0 = self.x_to_time(x - 6)
+        t1 = self.x_to_time(x + 6)
+        
+        i0 = bisect.bisect_left(times, t0)
+        i1 = bisect.bisect_right(times, t1)
+
+        for ev in events[i0:i1]:
             d = abs(
                 x -
                 self.time_to_x(ev.time)
@@ -2650,24 +3180,34 @@ class PianoRoll(QWidget):
 
         if event.button() == Qt.LeftButton:
             is_selected = False
+            in_selection_rect = False
             t1 = t2 = 0
             if getattr(self, "last_selection_in_pedal", False) and hasattr(self, "last_selection_time_range") and self.last_selection_time_range:
                 t1, t2 = self.last_selection_time_range
+                click_time = self.x_to_time(x)
+                if t1 <= click_time <= t2:
+                    in_selection_rect = True
                 if hit is not None and t1 <= hit.time <= t2:
                     is_selected = True
 
-            if is_selected:
+            if is_selected or (in_selection_rect and self.last_selection_time_range):
+                if not is_selected:
+                    t1, t2 = self.last_selection_time_range
                 selected_events = [ev for ev in events if t1 <= ev.time <= t2]
-                grid = self._get_snap_grid()
-                self.pedal_drag = {
-                    "mode": "move_multiple",
-                    "events": selected_events,
-                    "press_time": self.x_to_time(x),
-                    "changed": False,
-                    "original_times": {id(ev): ev.time for ev in selected_events},
-                    "grid": grid
-                }
+                if selected_events:
+                    grid = self._get_snap_grid()
+                    self.pedal_drag = {
+                        "mode": "move_multiple",
+                        "events": selected_events,
+                        "press_time": self.x_to_time(x),
+                        "changed": False,
+                        "original_times": {id(ev): ev.time for ev in selected_events},
+                        "grid": grid
+                    }
+                    self._clear_selection()
+                    return
             elif hit is not None:
+                self._clear_selection()
                 self.midi.push_undo()
                 new_ev = self.midi.toggle_pedal(track_index, hit.time)
                 self._pedal_after_change()
@@ -2681,6 +3221,7 @@ class PianoRoll(QWidget):
                         "grid": grid
                     }
             else:
+                self._clear_selection()
                 t = self.snap_time(self.x_to_time(x))
                 self.midi.push_undo()
                 self.midi.toggle_pedal(track_index, t)
@@ -3607,46 +4148,49 @@ class PianoRoll(QWidget):
                     note_bottom
                 )
 
-    def draw_notes(
-        self,
-        painter
-    ):
+    def _ensure_note_cache(self):
         if (
-            self._notes_starts_version !=
+            getattr(self, "_notes_starts_version", -1) !=
             self.midi.mutation_version
         ):
             self._notes_starts_cache = {}
             self._note_pens = {}
+            self._note_track_map = {}
+            total_count = 0
 
             for track_index, track in enumerate(
                 self.midi.tracks
             ):
-                sorted_notes = sorted(
-                    track.notes,
-                    key=lambda note: note.start
-                )
+                short_notes = []
+                long_notes = []
+                max_short_duration = 0.0
 
-                starts = [
-                    note.start
-                    for note in sorted_notes
-                ]
+                for note in track.notes:
+                    self._note_track_map[id(note)] = track_index
+                    total_count += 1
+                    if note.duration > 8.0:
+                        long_notes.append(note)
+                    else:
+                        short_notes.append(note)
+                        if note.duration > max_short_duration:
+                            max_short_duration = note.duration
 
-                max_duration = max(
-                    (
-                        note.duration
-                        for note in sorted_notes
-                    ),
-                    default=0.0
-                )
+                short_notes.sort(key=lambda n: n.start)
+                starts = [n.start for n in short_notes]
+
+                long_notes.sort(key=lambda n: n.start)
+                long_starts = [n.start for n in long_notes]
 
                 self._notes_starts_cache[track_index] = (
                     starts,
-                    sorted_notes,
-                    max_duration
+                    short_notes,
+                    max_short_duration,
+                    long_notes,
+                    long_starts
                 )
 
-                rgb = self.track_colors[
-                    track_index % len(self.track_colors)
+                rgb = getattr(self, "track_colors", [(100, 100, 200)])[
+                    track_index % len(getattr(self, "track_colors", [(100, 100, 200)]))
                 ]
 
                 fill_brush = QBrush(
@@ -3694,9 +4238,16 @@ class PianoRoll(QWidget):
                     sel_pen
                 )
 
+            self._cached_note_count = total_count
             self._notes_starts_version = (
                 self.midi.mutation_version
             )
+
+    def draw_notes(
+        self,
+        painter
+    ):
+        self._ensure_note_cache()
 
         visible_start = max(
             0.0,
@@ -3728,7 +4279,7 @@ class PianoRoll(QWidget):
                 track_items = []
 
         for track_index, track in track_items:
-            starts, notes, max_duration = (
+            starts, notes, max_duration, long_notes, long_starts = (
                 self._notes_starts_cache[
                     track_index
                 ]
@@ -3752,6 +4303,16 @@ class PianoRoll(QWidget):
                 win_end
             )
 
+            li0 = bisect.bisect_left(
+                long_starts,
+                win_start
+            )
+
+            li1 = bisect.bisect_right(
+                long_starts,
+                win_end
+            )
+
             fill_brush, outline_pen, sel_brush, sel_pen = (
                 self._note_pens[track_index]
             )
@@ -3766,6 +4327,65 @@ class PianoRoll(QWidget):
             )
 
             for note in notes[i0:i1]:
+                if note is self.drag_note:
+                    continue
+
+                y = self.pitch_to_y(
+                    note.pitch
+                )
+
+                if (
+                    y +
+                    self.note_height <
+                    note_top
+                ):
+                    continue
+
+                if y > note_bottom:
+                    continue
+
+                x = self.time_to_x(
+                    note.start
+                )
+
+                width = (
+                    note.duration /
+                    self.seconds_per_pixel
+                )
+
+                if (
+                    x +
+                    width <
+                    self.left_width
+                ):
+                    continue
+
+                if x > self.width():
+                    continue
+
+                if (
+                    sel_set is not None and
+                    id(note) in sel_set
+                ):
+                    painter.setPen(sel_pen)
+                    painter.setBrush(sel_brush)
+                else:
+                    painter.setPen(outline_pen)
+                    painter.setBrush(fill_brush)
+
+                painter.drawRoundedRect(
+                    int(x),
+                    int(y + 2),
+                    max(
+                        1,
+                        int(width)
+                    ),
+                    self.note_height - 4,
+                    3,
+                    3
+                )
+
+            for note in long_notes[li0:li1]:
                 if note is self.drag_note:
                     continue
 
@@ -3901,38 +4521,51 @@ class PianoRoll(QWidget):
         self,
         painter
     ):
-        if (
-            not self.selection_mode or
-            not self.selection_start or
-            not self.selection_end
-        ):
+        rect = None
+        in_lane = False
+        in_pedal = False
+
+        if self.selection_mode and self.selection_start and self.selection_end:
+            t1 = min(
+                self.selection_start[0],
+                self.selection_end[0]
+            )
+
+            t2 = max(
+                self.selection_start[0],
+                self.selection_end[0]
+            )
+
+            p1 = max(
+                self.min_pitch,
+                min(
+                    self.max_pitch,
+                    self.selection_start[1]
+                )
+            )
+
+            p2 = max(
+                self.min_pitch,
+                min(
+                    self.max_pitch,
+                    self.selection_end[1]
+                )
+            )
+
+            rect = (t1, t2, p1, p2)
+            in_lane = getattr(self, "selection_in_lane", False)
+            in_pedal = getattr(self, "selection_in_pedal", False)
+
+        elif self.selection_rect is not None:
+            t1, t2, p1, p2 = self.selection_rect[:4]
+            rect = (t1, t2, p1, p2)
+            in_lane = self.selection_rect[4] if len(self.selection_rect) > 4 else False
+            in_pedal = self.selection_rect[5] if len(self.selection_rect) > 5 else False
+
+        if rect is None:
             return
 
-        t1 = min(
-            self.selection_start[0],
-            self.selection_end[0]
-        )
-
-        t2 = max(
-            self.selection_start[0],
-            self.selection_end[0]
-        )
-
-        p1 = max(
-            self.min_pitch,
-            min(
-                self.max_pitch,
-                self.selection_start[1]
-            )
-        )
-
-        p2 = max(
-            self.min_pitch,
-            min(
-                self.max_pitch,
-                self.selection_end[1]
-            )
-        )
+        t1, t2, p1, p2 = rect
 
         x1 = self.time_to_x(
             t1
@@ -3942,8 +4575,8 @@ class PianoRoll(QWidget):
             t2
         )
 
-        if getattr(self, "selection_in_lane", False):
-            if getattr(self, "selection_in_pedal", False):
+        if in_lane:
+            if in_pedal:
                 y1 = self.height() - self.bottom_height + self.velocity_lane_height
                 y2 = y1 + self.pedal_lane_height
             else:
@@ -4511,10 +5144,8 @@ class PianoRoll(QWidget):
             )
         )
 
-        count = sum(
-            len(track.notes)
-            for track in self.midi.tracks
-        )
+        self._ensure_note_cache()
+        count = getattr(self, "_cached_note_count", 0)
 
         num, den = self.midi.time_sig_at(
             self.play_position
@@ -5179,7 +5810,14 @@ class PianoRoll(QWidget):
                 lane_top + 2
             )
 
-        for ev in events:
+        visible_start = max(0.0, self.scroll_x)
+        visible_end = self.x_to_time(self.width())
+        
+        times = [e.time for e in events]
+        i0 = bisect.bisect_left(times, visible_start - 1.0)
+        i1 = bisect.bisect_right(times, visible_end + 1.0)
+
+        for ev in events[i0:i1]:
             x = int(
                 self.time_to_x(ev.time)
             )

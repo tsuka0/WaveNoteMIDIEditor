@@ -5,23 +5,17 @@ class SpectrumData:
     def __init__(self):
         self.data = None
         self.times = None
-        self.midi_notes = None
         self.sr = None
         self.hop_length = 512
 
     def clear(self):
         self.data = None
         self.times = None
-        self.midi_notes = None
         self.sr = None
 
     def analyze(self, y, sr, min_note=36, max_note=96, a4_freq=440.0):
         self.sr = sr
 
-        self.midi_notes = np.arange(
-            min_note,
-            max_note + 1
-        )
 
         fmin = a4_freq * (2.0 ** ((min_note - 69) / 12.0))
 
