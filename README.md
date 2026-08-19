@@ -112,7 +112,7 @@ MIDIファイルを読み込んだ場合は、そのMIDIに含まれるテンポ
 
 ## プロジェクトのexe化コマンド
 ```
-python -m PyInstaller --onefile --windowed --icon=Assets\icon.ico main.py
+pyinstaller main.spec
 ```
 ## アイコン制作
 アイコンは[てつ(XIAO)](https://x.com/tt_xiaop)さんに作って頂きました...！  
