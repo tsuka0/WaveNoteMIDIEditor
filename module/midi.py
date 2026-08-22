@@ -682,6 +682,13 @@ class MidiData:
 
         off = beat - seg_start
 
+        # beat<->time round trips can leave values like 23.999999999999996
+        # instead of 24.0, which made measure labels duplicate or vanish.
+        snapped = round(off)
+
+        if abs(off - snapped) < 1e-6:
+            off = float(snapped)
+
         return (
             self._sig_cum_measure[i] + int(off // num),
             int(off) % num,
