@@ -20,6 +20,9 @@ class AudioData:
         self.eq_mid = 1.0
         self.eq_high = 1.0
         
+        self.b_low, self.a_low = scipy.signal.butter(4, 500 / (self.sr / 2), 'low')
+        self.b_high, self.a_high = scipy.signal.butter(4, 2000 / (self.sr / 2), 'high')
+        
         self._a4_freq = 440.0
 
         self._started_at = 0.0
@@ -191,26 +194,15 @@ class AudioData:
             y_mono = y[0] if y.ndim > 1 else y.copy()
             y_playback = np.vstack((y_mono, y_mono)).T
             
-        # EQ
-        if self.eq_low != 1.0 or self.eq_mid != 1.0 or self.eq_high != 1.0:
-            nyq = 0.5 * self.sr
-            low_cutoff = 250.0 / nyq
-            high_cutoff = 4000.0 / nyq
-            
-            b_low, a_low = scipy.signal.butter(2, low_cutoff, btype='low')
-            b_high, a_high = scipy.signal.butter(2, high_cutoff, btype='high')
-            
-            # Do not apply EQ to y_mono for spectrum
-            self.y_mono = y_mono
-            
-            # Apply EQ to y_playback
-            y_play_low = scipy.signal.filtfilt(b_low, a_low, y_playback, axis=0)
-            y_play_high = scipy.signal.filtfilt(b_high, a_high, y_playback, axis=0)
-            y_play_mid = y_playback - y_play_low - y_play_high
-            self.y = (y_play_low * self.eq_low) + (y_play_mid * self.eq_mid) + (y_play_high * self.eq_high)
-        else:
-            self.y_mono = y_mono
-            self.y = y_playback
+        nyq = 0.5 * self.sr
+        low_cutoff = 250.0 / nyq
+        high_cutoff = 4000.0 / nyq
+        
+        self.b_low, self.a_low = scipy.signal.butter(2, low_cutoff, btype='low')
+        self.b_high, self.a_high = scipy.signal.butter(2, high_cutoff, btype='high')
+        
+        self.y_mono = y_mono
+        self.y = y_playback
 
     def duration(self):
         if self.y is None:
@@ -408,6 +400,11 @@ class AudioData:
         reset_active_notes(start_position)
 
         try:
+            zi_low = scipy.signal.lfilter_zi(self.b_low, self.a_low)
+            zi_low = np.vstack((zi_low, zi_low)).T
+            zi_high = scipy.signal.lfilter_zi(self.b_high, self.a_high)
+            zi_high = np.vstack((zi_high, zi_high)).T
+            
             stream.start()
 
             while (
@@ -424,6 +421,11 @@ class AudioData:
                     self._render_progress = 0.0
                     self._silence_midi_out()
                     reset_active_notes(new_pos)
+                    
+                    zi_low = scipy.signal.lfilter_zi(self.b_low, self.a_low)
+                    zi_low = np.vstack((zi_low, zi_low)).T
+                    zi_high = scipy.signal.lfilter_zi(self.b_high, self.a_high)
+                    zi_high = np.vstack((zi_high, zi_high)).T
                     continue
 
                 if self._midi_cache_dirty or local_version != self._midi_cache_version:
@@ -475,7 +477,18 @@ class AudioData:
                         dtype=np.float32
                     )
 
+                # Apply Real-time EQ
+                b_low, a_low = self.b_low, self.a_low
+                b_high, a_high = self.b_high, self.a_high
+                y_low, zi_low = scipy.signal.lfilter(b_low, a_low, block, axis=0, zi=zi_low)
+                y_high, zi_high = scipy.signal.lfilter(b_high, a_high, block, axis=0, zi=zi_high)
+                
+                if self.eq_low != 1.0 or self.eq_mid != 1.0 or self.eq_high != 1.0:
+                    y_mid = block - y_low - y_high
+                    block = (y_low * self.eq_low) + (y_mid * self.eq_mid) + (y_high * self.eq_high)
+
                 block *= self.volume
+                block = block.astype(np.float32)
 
                 end_time = current_time + block_size / sample_rate
                 
@@ -1257,7 +1270,10 @@ class AudioData:
                 if self.output_device != "internal":
                     break
 
-                if not stream.active:
+                try:
+                    if not stream.active:
+                        break
+                except Exception:
                     break
 
                 time.sleep(0.05)
@@ -1363,6 +1379,17 @@ class AudioData:
         self.offset = 0.0
         self._start_position = 0.0
         self.file_path = None
+
+    def close(self):
+        self.playing = False
+        self._preview_stop_event.set()
+        
+        if self._preview_thread and self._preview_thread.is_alive():
+            self._preview_thread.join(timeout=1.0)
+            
+        play_thread = getattr(self, "_thread", None)
+        if play_thread and play_thread.is_alive():
+            play_thread.join(timeout=1.0)
 
     def seek(self, seconds):
         new_pos = max(0.0, min(seconds, self.max_position()))

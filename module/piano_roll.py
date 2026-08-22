@@ -279,7 +279,7 @@ class PianoRoll(QWidget):
             return
             
         self.midi.push_undo()
-        from midi import Note
+        from .midi import Note
         
         for note in target_notes:
             original_duration = note.duration
@@ -467,7 +467,6 @@ class PianoRoll(QWidget):
                 self.note_height
             )
         )
-
         return max(
             self.min_pitch,
             min(
@@ -1148,6 +1147,11 @@ class PianoRoll(QWidget):
         if event.button() == Qt.LeftButton and (
             event.modifiers() & Qt.AltModifier
         ):
+            if not hasattr(self.midi, "extra_state"):
+                self.midi.extra_state = {}
+            self.midi.extra_state["audio_offset"] = self.audio.offset
+            self.midi.push_undo()
+            
             self.offset_dragging = True
             self.offset_drag_start = QPointF(
                 x,
@@ -1162,12 +1166,21 @@ class PianoRoll(QWidget):
             return
 
         if event.button() == Qt.MiddleButton:
-            self.panning = True
-            self.pan_start_x = x
-            self.pan_start_scroll = self.scroll_x
-            self.setCursor(
-                Qt.ClosedHandCursor
-            )
+            if event.modifiers() & Qt.AltModifier:
+                if not hasattr(self.midi, "extra_state"):
+                    self.midi.extra_state = {}
+                self.midi.extra_state["audio_offset"] = self.audio.offset
+                self.midi.push_undo()
+                
+                self.offset_dragging = True
+                self.offset_drag_start = QPointF(x, y)
+                self.offset_drag_value = self.audio.offset
+                self.setCursor(Qt.SizeHorCursor)
+            else:
+                self.panning = True
+                self.pan_start_x = x
+                self.pan_start_scroll = self.scroll_x
+                self.setCursor(Qt.ClosedHandCursor)
             return
 
         lane_top = (
@@ -2014,6 +2027,10 @@ class PianoRoll(QWidget):
                 ) *
                 self.seconds_per_pixel
             )
+            
+            if not hasattr(self.midi, "extra_state"):
+                self.midi.extra_state = {}
+            self.midi.extra_state["audio_offset"] = self.audio.offset
 
             self.update()
             return
@@ -2160,6 +2177,9 @@ class PianoRoll(QWidget):
         event
     ):
         if event.button() == Qt.MiddleButton:
+            if self.offset_dragging:
+                self.offset_dragging = False
+                self.offset_drag_start = None
             self.panning = False
             self.unsetCursor()
 
@@ -2470,13 +2490,10 @@ class PianoRoll(QWidget):
 
                 for note in notes[:i1]:
                     if (
-                        note.start +
-                        note.duration >
-                        t1 and
-                        p1 <=
-                        note.pitch <=
-                        p2
+                        t1 <= note.start < t2 and
+                        p1 <= note.pitch <= p2
                     ):
+                        note._original_track = track_index
                         result.append(note)
 
                 li1 = bisect.bisect_left(
@@ -2486,13 +2503,10 @@ class PianoRoll(QWidget):
 
                 for note in long_notes[:li1]:
                     if (
-                        note.start +
-                        note.duration >
-                        t1 and
-                        p1 <=
-                        note.pitch <=
-                        p2
+                        t1 <= note.start < t2 and
+                        p1 <= note.pitch <= p2
                     ):
+                        note._original_track = track_index
                         result.append(note)
 
             self.selected_notes = result
@@ -2552,9 +2566,20 @@ class PianoRoll(QWidget):
             if not self.last_selection_time_range:
                 return
             t1, t2 = self.last_selection_time_range
-            track_idx = self.midi.active_track()
-            events = self.midi.tracks[track_idx].pedals
-            selected_pedals = [ev for ev in events if t1 <= ev.time <= t2]
+            
+            if self.midi.filter_track is None:
+                track_items = list(enumerate(self.midi.tracks))
+            else:
+                idx = self.midi.filter_track
+                track_items = [(idx, self.midi.tracks[idx])] if 0 <= idx < len(self.midi.tracks) else []
+                
+            selected_pedals = []
+            for t_idx, track in track_items:
+                for ev in track.pedals:
+                    if t1 <= ev.time <= t2:
+                        ev._original_track = t_idx
+                        selected_pedals.append(ev)
+                        
             if not selected_pedals:
                 return
             self.clipboard_pedals = self.midi.copy_pedals(selected_pedals)
@@ -3137,7 +3162,7 @@ class PianoRoll(QWidget):
             return
 
         self.midi.push_undo()
-        from midi import Note
+        from .midi import Note
         
         for (track_idx, pitch), group in groups.items():
             if len(group) < 2:

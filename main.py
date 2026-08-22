@@ -50,6 +50,7 @@ DEFAULT_SHORTCUTS = {
     "action_new_project": "Ctrl+N",
     "action_open_project": "Ctrl+O",
     "action_save_project": "Ctrl+S",
+    "action_save_midi": "Shift+S",
     "action_undo": "Ctrl+Z",
     "action_redo": "Ctrl+Y",
     "action_play": "Space",
@@ -74,7 +75,8 @@ class ShortcutDialog(QDialog):
         labels = {
             "action_new_project": "プロジェクトを新規作成",
             "action_open_project": "プロジェクトを開く",
-            "action_save_project": "プロジェクトを保存",
+            "action_save_project": "プロジェクト保存",
+            "action_save_midi": "MIDI保存",
             "action_undo": "元に戻す",
             "action_redo": "やり直し",
             "action_play": "再生 / 停止",
@@ -337,6 +339,7 @@ class MainWindow(QMainWindow):
         self._pending_audio_duration = None
         self._pending_tempo_analysis = None
         self._project_path = None
+        self._last_midi_path = None
         self._saved_project_state = None
 
         self._mark_project_saved()
@@ -481,8 +484,7 @@ class MainWindow(QMainWindow):
 
         self.discord_rpc_timer.stop()
         self.discord_rpc.close()
-        self.audio.stop()
-        self.audio._close_midi_out()
+        self.audio.close()
         super().closeEvent(event)
 
     def create_menu(self):
@@ -508,8 +510,11 @@ class MainWindow(QMainWindow):
         open_audio_action = QAction("オーディオを開く", self)
         open_audio_action.triggered.connect(self.open_audio)
 
-        save_action = QAction("MIDIを保存", self)
+        save_action = QAction("MIDI上書き保存", self)
         save_action.triggered.connect(self.save_midi)
+        
+        save_as_action = QAction("MIDI名前を付けて保存", self)
+        save_as_action.triggered.connect(self.save_midi_as)
 
         exit_action = QAction("終了", self)
         exit_action.triggered.connect(self.close)
@@ -520,6 +525,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction(open_midi_action)
         file_menu.addAction(open_audio_action)
         file_menu.addAction(save_action)
+        file_menu.addAction(save_as_action)
         file_menu.addAction(exit_action)
 
         edit_menu = self.menuBar().addMenu(
@@ -586,6 +592,7 @@ class MainWindow(QMainWindow):
         self.actions["action_new_project"] = new_project_action
         self.actions["action_open_project"] = load_project_action
         self.actions["action_save_project"] = save_project_action
+        self.actions["action_save_midi"] = save_action
         self.actions["action_undo"] = undo_action
         self.actions["action_redo"] = redo_action
         self.actions["action_play"] = play_action
@@ -903,7 +910,7 @@ class MainWindow(QMainWindow):
         self.eq_low_slider.setMaximumWidth(100)
         self.eq_low_slider.setMinimumWidth(30)
         self.eq_low_slider.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
-        self.eq_low_slider.sliderReleased.connect(self.change_eq)
+        self.eq_low_slider.valueChanged.connect(self.change_eq)
         audio_toolbar.addWidget(self.eq_low_slider)
         
         # Mid EQ
@@ -915,7 +922,7 @@ class MainWindow(QMainWindow):
         self.eq_mid_slider.setMaximumWidth(100)
         self.eq_mid_slider.setMinimumWidth(30)
         self.eq_mid_slider.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
-        self.eq_mid_slider.sliderReleased.connect(self.change_eq)
+        self.eq_mid_slider.valueChanged.connect(self.change_eq)
         audio_toolbar.addWidget(self.eq_mid_slider)
         
         # High EQ
@@ -927,7 +934,7 @@ class MainWindow(QMainWindow):
         self.eq_high_slider.setMaximumWidth(100)
         self.eq_high_slider.setMinimumWidth(30)
         self.eq_high_slider.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
-        self.eq_high_slider.sliderReleased.connect(self.change_eq)
+        self.eq_high_slider.valueChanged.connect(self.change_eq)
         audio_toolbar.addWidget(self.eq_high_slider)
 
         # EQ Reset Button
@@ -1088,7 +1095,6 @@ class MainWindow(QMainWindow):
         self.audio.eq_low = self.eq_low_slider.value() / 100.0
         self.audio.eq_mid = self.eq_mid_slider.value() / 100.0
         self.audio.eq_high = self.eq_high_slider.value() / 100.0
-        self.audio.apply_dsp()
 
     def reset_eq(self):
         self.eq_low_slider.setValue(100)
@@ -1461,12 +1467,18 @@ class MainWindow(QMainWindow):
     def undo(self):
         if not self.midi.undo():
             return
+            
+        if "audio_offset" in getattr(self.midi, "extra_state", {}):
+            self.audio.offset = self.midi.extra_state["audio_offset"]
 
         self.after_edit()
 
     def redo(self):
         if not self.midi.redo():
             return
+            
+        if "audio_offset" in getattr(self.midi, "extra_state", {}):
+            self.audio.offset = self.midi.extra_state["audio_offset"]
 
         self.after_edit()
 
@@ -1739,6 +1751,7 @@ class MainWindow(QMainWindow):
             self.midi.load(
                 path
             )
+            self._last_midi_path = path
 
             self.midi.clear_history()
 
@@ -1766,6 +1779,20 @@ class MainWindow(QMainWindow):
             )
 
     def save_midi(self):
+        if self._last_midi_path:
+            try:
+                self.midi.save(self._last_midi_path)
+                QMessageBox.information(self, "完了", "MIDIファイルを上書き保存しました。")
+            except Exception as e:
+                QMessageBox.critical(
+                    self,
+                    "エラー",
+                    f"保存中にエラーが発生しました:\n{e}"
+                )
+        else:
+            self.save_midi_as()
+
+    def save_midi_as(self):
         path, selected_filter = QFileDialog.getSaveFileName(
             self,
             "書き出しを保存",
@@ -1797,6 +1824,7 @@ class MainWindow(QMainWindow):
                 if not path.lower().endswith((".mid", ".midi")):
                     path += ".mid"
                 self.midi.save(path)
+                self._last_midi_path = path
                 QMessageBox.information(self, "完了", "MIDIファイルの保存が完了しました。")
                 
         except Exception as e:
@@ -1884,6 +1912,21 @@ if __name__ == "__main__":
     except Exception:
         pass
 
+    from PySide6.QtCore import qInstallMessageHandler, QtMsgType
+    def qt_message_handler(mode, context, message):
+        if mode == QtMsgType.QtWarningMsg and "QThreadStorage" in message:
+            return
+        
+        # 開発中の他の重要なエラー等は見落とさないように、それ以外は標準出力へ
+        if mode == QtMsgType.QtWarningMsg:
+            print(f"Warning: {message}")
+        elif mode == QtMsgType.QtCriticalMsg:
+            print(f"Critical: {message}")
+        elif mode == QtMsgType.QtFatalMsg:
+            print(f"Fatal: {message}")
+
+    qInstallMessageHandler(qt_message_handler)
+
     app = QApplication(
         sys.argv
     )
@@ -1900,6 +1943,6 @@ if __name__ == "__main__":
     window = MainWindow(initial_file=initial_file)
     window.show()
 
-    sys.exit(
-        app.exec()
-    )
+    ret = app.exec()
+    import os
+    os._exit(ret)

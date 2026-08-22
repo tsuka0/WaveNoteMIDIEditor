@@ -68,21 +68,20 @@ class MidiData:
                         for note in track.notes
                     ],
                     pedals=[
-                        PedalEvent(
-                            pedal.time,
-                            pedal.down
-                        )
-                        for pedal in track.pedals
+                        copy.copy(p)
+                        for p in track.pedals
                     ],
                     channel=track.channel
                 )
                 for track in self.tracks
             ],
-            "tempos": list(self.tempos),
-            "time_signatures": list(self.time_signatures),
+            "tempos": self.tempos.copy(),
+            "time_signatures": self.time_signatures.copy(),
+            "extra_state": getattr(self, "extra_state", {}).copy()
         }
 
     def restore(self, snap):
+        self.extra_state = snap.get("extra_state", {}).copy()
         self.tracks = [
             Track(
                 name=track.name,
@@ -814,37 +813,43 @@ class MidiData:
                     x.pitch
                 )
             )
+            track.pedals.sort(key=lambda x: x.time)
 
     def copy_notes(self, notes):
-        return [
-            note.clone()
-            for note in notes
-        ]
+        copied = []
+        for note in notes:
+            new_note = note.clone()
+            new_note._original_track = getattr(note, '_original_track', 0)
+            copied.append(new_note)
+        return copied
 
     def paste_notes(self, notes, start_time, pitch_offset=0):
         if not notes:
             return []
 
-        base_time = min(
-            note.start
-            for note in notes
-        )
-
-        track = self.tracks[
-            self.active_track()
-        ]
-
+        base_time = min(note.start for note in notes)
         created = []
+        is_all_tracks = (self.filter_track is None)
 
         for note in notes:
+            if is_all_tracks:
+                t_idx = getattr(note, '_original_track', self.active_track())
+                if t_idx >= len(self.tracks):
+                    t_idx = self.active_track()
+            else:
+                t_idx = self.active_track()
+                
+            track = self.tracks[t_idx]
+
             new_note = Note(
-                start_time + (note.start - base_time),
+                note.start - base_time + start_time,
                 note.duration,
-                note.pitch + pitch_offset,
+                max(0, min(127, note.pitch + pitch_offset)),
                 note.velocity,
                 getattr(note, 'channel', track.channel)
             )
-
+            new_note._original_track = t_idx
+            
             is_duplicate = False
             new_end = new_note.start + new_note.duration
             for n in track.notes:
@@ -860,7 +865,45 @@ class MidiData:
 
         self.sort()
         self._bump()
+        return created
 
+    def copy_pedals(self, pedals):
+        copied = []
+        for pedal in pedals:
+            new_pedal = copy.copy(pedal)
+            new_pedal._original_track = getattr(pedal, '_original_track', 0)
+            copied.append(new_pedal)
+        return copied
+
+    def paste_pedals(self, pedals, start_time):
+        if not pedals:
+            return []
+
+        base_time = min(p.time for p in pedals)
+        created = []
+        is_all_tracks = (self.filter_track is None)
+
+        for pedal in pedals:
+            if is_all_tracks:
+                t_idx = getattr(pedal, '_original_track', self.active_track())
+                if t_idx >= len(self.tracks):
+                    t_idx = self.active_track()
+            else:
+                t_idx = self.active_track()
+                
+            track = self.tracks[t_idx]
+            
+            new_pedal = PedalEvent(
+                pedal.time - base_time + start_time,
+                pedal.down
+            )
+            new_pedal._original_track = t_idx
+            
+            track.pedals.append(new_pedal)
+            created.append(new_pedal)
+
+        self.sort()
+        self._bump()
         return created
 
     def save(self, path):
@@ -1294,5 +1337,6 @@ class MidiData:
         self.has_file = True
 
         self.sort()
+        self.extra_state = {}
         self._refresh_caches()
         self._bump()

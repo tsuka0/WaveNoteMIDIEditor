@@ -157,13 +157,16 @@ class DiscordRPC:
             },
             "nonce": str(time.time())
         }
-        self._send_payload(1, payload_dict)
         
-        with self._lock:
-            if self.pipe:
-                try:
-                    self.pipe.close()
-                except:
-                    pass
-                self.pipe = None
-            self.connected = False
+        def _close_task():
+            self._send_payload(1, payload_dict)
+            with self._lock:
+                if self.pipe:
+                    try:
+                        self.pipe.close()
+                    except:
+                        pass
+                    self.pipe = None
+                self.connected = False
+                
+        threading.Thread(target=_close_task, daemon=True).start()
