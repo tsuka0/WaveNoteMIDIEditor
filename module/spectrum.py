@@ -17,7 +17,8 @@ class SpectrumData:
         self.sr = sr
 
 
-        fmin = a4_freq * (2.0 ** ((min_note - 69) / 12.0))
+        # Shift fmin down by 1 sub-bin (1/36 octave) so that the middle of the 3 sub-bins is exactly the note frequency
+        fmin = a4_freq * (2.0 ** ((min_note - 69) / 12.0 - 1.0 / 36.0))
 
         bins_per_octave = 36
         sub_bins = bins_per_octave // 12

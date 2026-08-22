@@ -9,6 +9,7 @@ from .midi import PedalEvent
 
 class PianoRoll(QWidget):
     marker_edited = Signal()
+    track_switch_requested = Signal(int)
 
     def __init__(
         self,
@@ -493,7 +494,7 @@ class PianoRoll(QWidget):
         self,
         value,
         grid=None,
-        mode="round"
+        mode="floor"
     ):
         import math
         if grid is None:
@@ -989,6 +990,8 @@ class PianoRoll(QWidget):
         event
     ):
         delta = event.angleDelta().y()
+        if delta == 0:
+            delta = event.angleDelta().x()
 
         if (
             event.modifiers() & Qt.ControlModifier and
@@ -1051,6 +1054,14 @@ class PianoRoll(QWidget):
                     max_scroll
                 )
             )
+
+        elif event.modifiers() & Qt.AltModifier:
+            if delta > 0:
+                self.track_switch_requested.emit(-1)
+            elif delta < 0:
+                self.track_switch_requested.emit(1)
+            event.accept()
+            return
 
         elif event.modifiers() & Qt.ControlModifier:
             mouse_time = self.x_to_time(
@@ -2061,11 +2072,9 @@ class PianoRoll(QWidget):
             ):
                 self.press_moved = True
 
-            new_start = self.snap_time(
-                original_start +
-                dx *
-                self.seconds_per_pixel
-            )
+            snapped_start_mouse = self.snap_time(self.x_to_time(self.drag_start.x()))
+            snapped_current_mouse = self.snap_time(self.x_to_time(x))
+            new_start = original_start + (snapped_current_mouse - snapped_start_mouse)
 
             new_pitch = (
                 original_pitch -
@@ -2119,7 +2128,7 @@ class PianoRoll(QWidget):
             original_end = original_start + original_duration
             
             new_end = self.snap_time(
-                original_end + dx * self.seconds_per_pixel,
+                self.x_to_time(x),
                 grid=self.note_length
             )
             
@@ -5026,19 +5035,19 @@ class PianoRoll(QWidget):
                     )
                 )
 
-                painter.drawText(
-                    int(x + 4),
-                    14,
-                    str(
-                        beat_number + 1
+                m, b_in_m, _ = self.midi.measure_beat(t)
+                if b_in_m == 0:
+                    painter.drawText(
+                        int(x + 4),
+                        14,
+                        str(m + 1)
                     )
-                )
 
-                painter.drawText(
-                    int(x + 4),
-                    27,
-                    f"{t:.2f}s"
-                )
+                    painter.drawText(
+                        int(x + 4),
+                        27,
+                        f"{t:.2f}s"
+                    )
 
             b += stride
             beat_number += stride
@@ -5233,17 +5242,17 @@ class PianoRoll(QWidget):
             )
         )
 
-        painter.drawText(
-            10,
-            self.height() - 26,
-            f"ノーツ {count} | "
-            f"拍子 {num}/{den} | "
-            f"{measure + 1}小節 "
-            f"{beat_in + 1}拍 | "
-            f"{bpm:g} BPM | "
-            f"{self.play_position:.2f} / "
-            f"{self.audio_duration:.2f}s"
-        )
+        # painter.drawText(
+        #     10,
+        #     self.height() - 26,
+        #     f"ノーツ {count} | "
+        #     f"拍子 {num}/{den} | "
+        #     f"{measure + 1}小節 "
+        #     f"{beat_in + 1}拍 | "
+        #     f"{bpm:g} BPM | "
+        #     f"{self.play_position:.2f} / "
+        #     f"{self.audio_duration:.2f}s"
+        # )
 
         scrub_y = (
             self.height() -

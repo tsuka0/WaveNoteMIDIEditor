@@ -33,7 +33,8 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QVBoxLayout,
     QFormLayout, 
-    QKeySequenceEdit
+    QKeySequenceEdit,
+    QSizePolicy
 )
 from PySide6.QtGui import QAction, QKeySequence, QIcon
 from PySide6.QtCore import QTimer, Qt, QEvent, QObject
@@ -248,6 +249,7 @@ class MainWindow(QMainWindow):
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
         self.setWindowTitle("WaveNoteMIDIEditor")
+        self.setMinimumSize(1280, 720)
         self.showMaximized()
         self.setAcceptDrops(True)
         self.setContextMenuPolicy(Qt.PreventContextMenu)
@@ -268,6 +270,9 @@ class MainWindow(QMainWindow):
             self.audio,
             self.spectrum,
             self.midi
+        )
+        self.editor.track_switch_requested.connect(
+            self.switch_track_by_delta
         )
 
         saved_return = load_value(
@@ -803,9 +808,9 @@ class MainWindow(QMainWindow):
             )
         )
 
-        self.threshold_slider.setFixedWidth(
-            150
-        )
+        self.threshold_slider.setMaximumWidth(150)
+        self.threshold_slider.setMinimumWidth(50)
+        self.threshold_slider.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
 
         self.threshold_slider.setToolTip(
             "弱い部分を非表示にする閾値"
@@ -842,9 +847,9 @@ class MainWindow(QMainWindow):
             )
         )
 
-        self.sensitivity_slider.setFixedWidth(
-            150
-        )
+        self.sensitivity_slider.setMaximumWidth(150)
+        self.sensitivity_slider.setMinimumWidth(50)
+        self.sensitivity_slider.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
 
         self.sensitivity_slider.setToolTip(
             "感度：低いほど鮮明、高いほど広範囲表示"
@@ -858,45 +863,79 @@ class MainWindow(QMainWindow):
             self.sensitivity_slider
         )
 
-        volume_label = QLabel(
-            "  音声ファイル音量 "
-        )
+        volume_label = QLabel("  音声ファイル音量 ")
+        toolbar.addWidget(volume_label)
 
-        toolbar.addWidget(
-            volume_label
-        )
+        self.volume_slider = QSlider(Qt.Horizontal)
+        self.volume_slider.setRange(0, 50)
+        self.volume_slider.setValue(int(self.audio.volume * 100))
+        self.volume_slider.setMaximumWidth(150)
+        self.volume_slider.setMinimumWidth(50)
+        self.volume_slider.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
+        self.volume_slider.setToolTip("音声ファイルの音量")
+        self.volume_slider.valueChanged.connect(self.change_volume)
+        toolbar.addWidget(self.volume_slider)
 
-        self.volume_slider = QSlider(
-            Qt.Horizontal
-        )
+        # --- Audio DSP Toolbar (New Row) ---
+        self.addToolBarBreak()
+        audio_toolbar = self.addToolBar("Audio DSP")
+        audio_toolbar.setMovable(False)
+        audio_toolbar.setContextMenuPolicy(Qt.PreventContextMenu)
 
-        self.volume_slider.setRange(
-            0,
-            50
-        )
+        # Channel Mode
+        channel_label = QLabel("  解析/音声: ")
+        audio_toolbar.addWidget(channel_label)
+        self.channel_combo = QComboBox()
+        self.channel_combo.addItems(["ステレオ", "L+R (モノラル)", "L-R (ボーカルキャンセル)", "Lのみ", "Rのみ"])
+        self.channel_combo.currentIndexChanged.connect(self.change_channel_mode)
+        audio_toolbar.addWidget(self.channel_combo)
+        
+        # Simple EQ
+        eq_label = QLabel("  EQ: ")
+        audio_toolbar.addWidget(eq_label)
+        
+        # Low EQ
+        self.eq_low_label = QLabel(" 低域")
+        audio_toolbar.addWidget(self.eq_low_label)
+        self.eq_low_slider = QSlider(Qt.Horizontal)
+        self.eq_low_slider.setRange(0, 200) # 0.0x to 2.0x
+        self.eq_low_slider.setValue(100)
+        self.eq_low_slider.setMaximumWidth(100)
+        self.eq_low_slider.setMinimumWidth(30)
+        self.eq_low_slider.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
+        self.eq_low_slider.sliderReleased.connect(self.change_eq)
+        audio_toolbar.addWidget(self.eq_low_slider)
+        
+        # Mid EQ
+        self.eq_mid_label = QLabel(" 中域")
+        audio_toolbar.addWidget(self.eq_mid_label)
+        self.eq_mid_slider = QSlider(Qt.Horizontal)
+        self.eq_mid_slider.setRange(0, 200)
+        self.eq_mid_slider.setValue(100)
+        self.eq_mid_slider.setMaximumWidth(100)
+        self.eq_mid_slider.setMinimumWidth(30)
+        self.eq_mid_slider.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
+        self.eq_mid_slider.sliderReleased.connect(self.change_eq)
+        audio_toolbar.addWidget(self.eq_mid_slider)
+        
+        # High EQ
+        self.eq_high_label = QLabel(" 高域")
+        audio_toolbar.addWidget(self.eq_high_label)
+        self.eq_high_slider = QSlider(Qt.Horizontal)
+        self.eq_high_slider.setRange(0, 200)
+        self.eq_high_slider.setValue(100)
+        self.eq_high_slider.setMaximumWidth(100)
+        self.eq_high_slider.setMinimumWidth(30)
+        self.eq_high_slider.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
+        self.eq_high_slider.sliderReleased.connect(self.change_eq)
+        audio_toolbar.addWidget(self.eq_high_slider)
 
-        self.volume_slider.setValue(
-            int(
-                self.audio.volume *
-                100
-            )
-        )
+        # EQ Reset Button
+        self.eq_reset_btn = QPushButton("リセット")
+        self.eq_reset_btn.setToolTip("EQをフラット(初期値)に戻します")
+        self.eq_reset_btn.clicked.connect(self.reset_eq)
+        audio_toolbar.addWidget(self.eq_reset_btn)
 
-        self.volume_slider.setFixedWidth(
-            150
-        )
-
-        self.volume_slider.setToolTip(
-            "音声ファイルの音量"
-        )
-
-        self.volume_slider.valueChanged.connect(
-            self.change_volume
-        )
-
-        toolbar.addWidget(
-            self.volume_slider
-        )
 
     def open_settings(self):
         dialog = SettingsDialog(
@@ -967,6 +1006,11 @@ class MainWindow(QMainWindow):
 
         self.track_combo.blockSignals(False)
 
+    def switch_track_by_delta(self, delta):
+        idx = self.track_combo.currentIndex() + delta
+        idx = max(0, min(self.track_combo.count() - 1, idx))
+        self.track_combo.setCurrentIndex(idx)
+
     def change_track(self, index):
         self.editor.set_track_filter(
             self.track_combo.currentData()
@@ -1034,6 +1078,40 @@ class MainWindow(QMainWindow):
             value /
             100.0
         )
+
+    def change_channel_mode(self, index):
+        self.audio.channel_mode = index
+        self.audio.apply_dsp()
+        self.update_spectrum()
+
+    def change_eq(self):
+        self.audio.eq_low = self.eq_low_slider.value() / 100.0
+        self.audio.eq_mid = self.eq_mid_slider.value() / 100.0
+        self.audio.eq_high = self.eq_high_slider.value() / 100.0
+        self.audio.apply_dsp()
+
+    def reset_eq(self):
+        self.eq_low_slider.setValue(100)
+        self.eq_mid_slider.setValue(100)
+        self.eq_high_slider.setValue(100)
+        self.change_eq()
+
+    def update_spectrum(self):
+        if self.audio.y_mono is None:
+            return
+        # Show progress or just block briefly
+        # Since analyze is fast enough, we just run it directly. If it takes too long, 
+        # it should be put in a thread. But it's usually acceptable for CQT cache warmups.
+        self.spectrum.analyze(
+            self.audio.y_mono,
+            self.audio.sr,
+            self.editor.min_pitch,
+            self.editor.max_pitch,
+            self.audio.a4_freq
+        )
+        self.editor.warm_spectrum_cache()
+        self.editor.update()
+
 
     def change_sensitivity(self, value):
         self.editor.spectrum_db_range = float(value)
@@ -1327,7 +1405,7 @@ class MainWindow(QMainWindow):
                     self._pending_audio_duration = duration
 
                     self.spectrum.analyze(
-                        self.audio.y,
+                        self.audio.y_mono,
                         self.audio.sr,
                         self.editor.min_pitch,
                         self.editor.max_pitch,
@@ -1566,7 +1644,7 @@ class MainWindow(QMainWindow):
                     self._pending_audio_duration = duration
 
                     self.spectrum.analyze(
-                        self.audio.y,
+                        self.audio.y_mono,
                         self.audio.sr,
                         self.editor.min_pitch,
                         self.editor.max_pitch,
@@ -1576,7 +1654,7 @@ class MainWindow(QMainWindow):
                     if analyze_tempo:
                         try:
                             tempo_result = self.spectrum.analyze_tempo(
-                                self.audio.y,
+                                self.audio.y_mono,
                                 self.audio.sr
                             )
                         except Exception:

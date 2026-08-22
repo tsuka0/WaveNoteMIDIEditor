@@ -985,6 +985,9 @@ class MidiData:
                     )
                 )
 
+                if end_tick <= start_tick:
+                    end_tick = start_tick + max(1, int(round(ticks_per_beat / 480.0)))
+
                 events.append(
                     (start_tick, 1, note)
                 )
@@ -1031,8 +1034,8 @@ class MidiData:
                     mtrack.append(
                         mido.Message(
                             "note_on",
-                            note=payload.pitch,
-                            velocity=payload.velocity,
+                            note=max(0, min(127, payload.pitch)),
+                            velocity=max(0, min(127, payload.velocity)),
                             channel=export_channel,
                             time=delta
                         )
@@ -1055,7 +1058,7 @@ class MidiData:
                     mtrack.append(
                         mido.Message(
                             "note_off",
-                            note=payload.pitch,
+                            note=max(0, min(127, payload.pitch)),
                             velocity=0,
                             channel=export_channel,
                             time=delta
@@ -1065,7 +1068,13 @@ class MidiData:
         midi.save(path)
 
     def load(self, path):
-        midi = mido.MidiFile(path, charset='utf-8')
+        try:
+            midi = mido.MidiFile(path, charset='utf-8', clip=True)
+        except UnicodeDecodeError:
+            try:
+                midi = mido.MidiFile(path, charset='cp932', clip=True)
+            except UnicodeDecodeError:
+                midi = mido.MidiFile(path, charset='latin-1', clip=True)
 
         ticks_per_beat = midi.ticks_per_beat
 
@@ -1220,10 +1229,12 @@ class MidiData:
 
                         start = ticks_to_seconds(start_tick)
 
+                        min_tick_diff = max(1, ticks_per_beat / 480.0)
+                        min_duration = ticks_to_seconds(start_tick + min_tick_diff) - start
+
                         duration = max(
-                            ticks_to_seconds(abs_tick) -
-                            start,
-                            0.05
+                            ticks_to_seconds(abs_tick) - start,
+                            min_duration
                         )
 
                         notes.append(

@@ -3,15 +3,22 @@ import time
 import bisect
 import numpy as np
 import sounddevice as sd
+import scipy.signal
 import librosa
 from . import midiout
 
 class AudioData:
     def __init__(self):
         self.y = None
+        self.y_raw = None
         self.sr = 44100
         self.position = 0.0
         self.playing = False
+        
+        self.channel_mode = 0  # 0: L+R, 1: L-R, 2: L, 3: R
+        self.eq_low = 1.0
+        self.eq_mid = 1.0
+        self.eq_high = 1.0
         
         self._a4_freq = 440.0
 
@@ -137,11 +144,13 @@ class AudioData:
     def load(self, path):
         self.stop()
 
-        self.y, self.sr = librosa.load(
+        self.y_raw, self.sr = librosa.load(
             path,
             sr=None,
-            mono=True
+            mono=False
         )
+        
+        self.apply_dsp()
 
         self.file_path = path
         self.position = 0.0
@@ -149,6 +158,59 @@ class AudioData:
         
 
         return len(self.y) / self.sr
+
+    def apply_dsp(self):
+        if self.y_raw is None:
+            return
+            
+        y = self.y_raw
+        
+        # Channel mode
+        if y.ndim > 1 and y.shape[0] > 1:
+            L = y[0]
+            R = y[1]
+            if self.channel_mode == 0:  # Stereo
+                y_mono = (L + R) * 0.5
+                y_playback = np.vstack((L, R)).T
+            elif self.channel_mode == 1:  # L+R (Mix)
+                y_mono = (L + R) * 0.5
+                y_playback = np.vstack((y_mono, y_mono)).T
+            elif self.channel_mode == 2:  # L-R (Vocal Cancel)
+                y_mono = (L - R) * 0.5
+                y_playback = np.vstack((y_mono, y_mono)).T
+            elif self.channel_mode == 3:  # L
+                y_mono = L.copy()
+                y_playback = np.vstack((y_mono, y_mono)).T
+            elif self.channel_mode == 4:  # R
+                y_mono = R.copy()
+                y_playback = np.vstack((y_mono, y_mono)).T
+            else:
+                y_mono = (L + R) * 0.5
+                y_playback = np.vstack((y_mono, y_mono)).T
+        else:
+            y_mono = y[0] if y.ndim > 1 else y.copy()
+            y_playback = np.vstack((y_mono, y_mono)).T
+            
+        # EQ
+        if self.eq_low != 1.0 or self.eq_mid != 1.0 or self.eq_high != 1.0:
+            nyq = 0.5 * self.sr
+            low_cutoff = 250.0 / nyq
+            high_cutoff = 4000.0 / nyq
+            
+            b_low, a_low = scipy.signal.butter(2, low_cutoff, btype='low')
+            b_high, a_high = scipy.signal.butter(2, high_cutoff, btype='high')
+            
+            # Do not apply EQ to y_mono for spectrum
+            self.y_mono = y_mono
+            
+            # Apply EQ to y_playback
+            y_play_low = scipy.signal.filtfilt(b_low, a_low, y_playback, axis=0)
+            y_play_high = scipy.signal.filtfilt(b_high, a_high, y_playback, axis=0)
+            y_play_mid = y_playback - y_play_low - y_play_high
+            self.y = (y_play_low * self.eq_low) + (y_play_mid * self.eq_mid) + (y_play_high * self.eq_high)
+        else:
+            self.y_mono = y_mono
+            self.y = y_playback
 
     def duration(self):
         if self.y is None:
@@ -293,7 +355,7 @@ class AudioData:
         try:
             stream = sd.OutputStream(
                 samplerate=sample_rate,
-                channels=1,
+                channels=2,
                 dtype="float32",
                 blocksize=block_size
             )
@@ -403,13 +465,13 @@ class AudioData:
                         block = np.pad(
                             block,
                             (
-                                0,
-                                block_size - len(block)
+                                (0, block_size - len(block)),
+                                (0, 0)
                             )
                         )
                 else:
                     block = np.zeros(
-                        block_size,
+                        (block_size, 2),
                         dtype=np.float32
                     )
 
@@ -438,7 +500,7 @@ class AudioData:
                     active_notes
                 )
 
-                block += midi_block * 0.35
+                block += midi_block[:, np.newaxis] * 0.35
 
                 peak = np.max(np.abs(block))
 
@@ -1160,6 +1222,7 @@ class AudioData:
                 )
 
                 outdata[:, 0] = wave
+                outdata[:, 1] = wave
 
                 phase0 = (
                     phase0 +
@@ -1176,7 +1239,7 @@ class AudioData:
             try:
                 stream = sd.OutputStream(
                     samplerate=self.sr,
-                    channels=1,
+                    channels=2,
                     dtype="float32",
                     blocksize=512,
                     callback=callback
