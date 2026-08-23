@@ -2,6 +2,7 @@ import os
 import time
 import sys
 import ctypes
+import gzip
 import threading
 import json
 from pathlib import Path
@@ -13,6 +14,18 @@ def get_resource_path(relative_path):
     except Exception:
         base_path = os.path.abspath(os.path.dirname(__file__))
     return os.path.join(base_path, relative_path)
+
+GZIP_MAGIC = b"\x1f\x8b"
+
+def read_project_json(path):
+    """プロジェクトファイルを読み込む (gzip圧縮 / 従来の平文JSON 両対応)"""
+    with open(path, "rb") as f:
+        raw = f.read()
+
+    if raw[:2] == GZIP_MAGIC:
+        raw = gzip.decompress(raw)
+
+    return json.loads(raw.decode("utf-8"))
 
 from PySide6.QtWidgets import (
     QApplication,
@@ -454,8 +467,7 @@ class MainWindow(QMainWindow):
             self.load_audio_file(path)
         else:
             try:
-                with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
+                data = read_project_json(path)
                 if isinstance(data, dict) and ("midi_tracks" in data or "audio_file" in data):
                     self.load_project(path)
                     return
@@ -1249,7 +1261,7 @@ class MainWindow(QMainWindow):
 
     def _save_project_to_path(self, path):
         try:
-            with open(path, "w", encoding="utf-8") as f:
+            with gzip.open(path, "wt", encoding="utf-8") as f:
                 json.dump(
                     self._project_data(),
                     f,
@@ -1303,8 +1315,7 @@ class MainWindow(QMainWindow):
         save_last_dir_from_path(path)
 
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                project = json.load(f)
+            project = read_project_json(path)
         except Exception as e:
             QMessageBox.critical(
                 self,

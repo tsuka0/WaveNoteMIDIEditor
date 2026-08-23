@@ -508,6 +508,10 @@ class PianoRoll(QWidget):
 
         if mode == "floor":
             snapped = math.floor(beat / grid) * grid
+        elif mode == "ceil":
+            # 浮動小数点誤差でわずかに手前になった値が
+            # 次のグリッドに切り上がらないよう許容誤差を持たせる
+            snapped = math.ceil(beat / grid - 1e-6) * grid
         else:
             snapped = round(beat / grid) * grid
 
@@ -2714,6 +2718,14 @@ class PianoRoll(QWidget):
         start_time = self.snap_time(
             self.play_position
         )
+
+        # スナップにより再生バーより左側に
+        # 貼り付けられる場合は切り上げて補正する
+        if start_time < self.play_position - 1e-6:
+            start_time = self.snap_time(
+                self.play_position,
+                mode="ceil"
+            )
 
         if self.clipboard_notes:
             created = (
