@@ -4,6 +4,7 @@
 </p>
 
 # WaveNote MIDI Editor 
+ダウンロードは[こちらから](https://github.com/tsuka0/WaveNoteMIDIEditor/releases/latest)!!
 
 音声ファイルのスペクトラムを確認しながら、MIDIを作成・編集できる Windows 向けピアノロールエディタです。  
 音声とMIDIを同じタイムラインで扱えるため、耳と視覚の両方を使ってノートを調整できます。  
