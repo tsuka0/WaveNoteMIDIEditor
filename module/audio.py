@@ -433,6 +433,15 @@ class AudioData:
                         self._refresh_midi_cache()
                     local_version = self._midi_cache_version
 
+                    # The note lists were rebuilt (e.g. track filter
+                    # switched during playback).  next_note_idx still
+                    # points into the old list, so re-anchor scheduling
+                    # at the current position or notes stop sounding.
+                    reset_active_notes(
+                        start_position +
+                        sample_position / sample_rate
+                    )
+
                 current_time = (
                     start_position +
                     sample_position / sample_rate
@@ -1024,7 +1033,16 @@ class AudioData:
                         phase_array
                     )
                 ) *
-                0.6
+                0.6 *
+                (
+                    max(
+                        1,
+                        min(
+                            127,
+                            self._preview_target.get("velocity", 100)
+                        )
+                    ) / 127.0
+                )
             )
 
             attack_length = max(
@@ -1108,7 +1126,7 @@ class AudioData:
 
             self._midi_out_preview_pitch = pitch
 
-    def preview_note(self, pitch, duration=0.25):
+    def preview_note(self, pitch, duration=0.25, velocity=100):
         if self.playing:
             # Brief preview during playback to confirm key press
             self.preview_pitch = pitch
@@ -1118,6 +1136,7 @@ class AudioData:
         self._ensure_preview_thread()
 
         self._preview_target["pitch"] = pitch
+        self._preview_target["velocity"] = max(1, min(127, int(velocity)))
         self._preview_target["trigger"] = self._preview_target.get("trigger", 0) + 1
 
     def _ensure_preview_thread(self):
@@ -1233,6 +1252,14 @@ class AudioData:
                         -times * 12.0
                     )
                 )
+
+                # Match the playback note level (0.6 * velocity/127 * 0.28)
+                velocity = (
+                    self._preview_target.get("velocity", 100) /
+                    127.0
+                )
+
+                wave *= velocity * 0.28
 
                 outdata[:, 0] = wave
                 outdata[:, 1] = wave

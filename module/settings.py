@@ -41,3 +41,19 @@ def save_value(name, value):
     )
 
     winreg.CloseKey(key)
+
+
+def delete_value(name):
+    try:
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            REG_KEY,
+            0,
+            winreg.KEY_SET_VALUE
+        )
+
+        winreg.DeleteValue(key, name)
+
+        winreg.CloseKey(key)
+    except OSError:
+        pass

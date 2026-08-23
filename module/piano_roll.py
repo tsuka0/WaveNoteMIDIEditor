@@ -1363,15 +1363,25 @@ class PianoRoll(QWidget):
 
             self.selection_mode = True
             self.selection_rect = None
+            self._selection_cursor_y = y
             
             if y >= lane_top + self.velocity_lane_height:
-                self.selection_start = (self.snap_time(self.x_to_time(x), mode="floor"), self.min_pitch)
+                self.selection_start = (
+                    self.snap_time(
+                        self.x_to_time(x),
+                        mode="floor"
+                    ),
+                    self.min_pitch
+                )
                 self.selection_end = self.selection_start
                 self.selection_in_lane = True
                 self.selection_in_pedal = True
             else:
                 self.selection_start = (
-                    self.snap_time(self.x_to_time(x), mode="floor"),
+                    self.snap_time(
+                        self.x_to_time(x),
+                        mode="floor"
+                    ),
                     self.y_to_pitch(y)
                 )
                 self.selection_end = self.selection_start
@@ -1420,7 +1430,10 @@ class PianoRoll(QWidget):
 
         if self.selection_mode:
             self.selection_end = (
-                self.x_to_time(x),
+                self.snap_time(
+                    self.x_to_time(x),
+                    mode="floor"
+                ),
                 self.y_to_pitch(y)
             )
 
@@ -1943,9 +1956,13 @@ class PianoRoll(QWidget):
                 
                 if self.selection_mode and self.selection_start:
                     lane_top = self.height() - self.bottom_height
+                    self._selection_cursor_y = y
                     self.selection_end = (
-                        self.snap_time(self.x_to_time(x)),
-                        self.y_to_pitch(y) if y < lane_top else self.min_pitch
+                        self.snap_time(
+                            self.x_to_time(x),
+                            mode="floor"
+                        ),
+                        self.y_to_pitch(min(y, lane_top - 1))
                     )
                 elif self.drag_note is not None:
                     self.drag_start.setX(self.drag_start.x() - diff_px)
@@ -2038,9 +2055,16 @@ class PianoRoll(QWidget):
         if self.selection_mode:
             if self.selection_start:
                 lane_top = self.height() - self.bottom_height
+                self._selection_cursor_y = y
                 self.selection_end = (
-                    self.snap_time(self.x_to_time(x)),
-                    self.y_to_pitch(y) if y < lane_top else self.min_pitch
+                    self.snap_time(
+                        self.x_to_time(x),
+                        mode="floor"
+                    ),
+                    # Clamp to the bottom-most visible row instead of
+                    # min_pitch, so entering the lane area does not
+                    # extend the selection past the visible grid.
+                    self.y_to_pitch(min(y, lane_top - 1))
                 )
                 self.update()
 
@@ -2417,6 +2441,7 @@ class PianoRoll(QWidget):
         self.selection_rect = None
         self.last_selection_time_range = None
         self.last_selection_in_pedal = False
+        self._selection_cursor_y = None
 
     def finish_selection(self):
         if not self.selection_start or not self.selection_end:
@@ -4672,8 +4697,34 @@ class PianoRoll(QWidget):
                 y1 = self.height() - self.bottom_height
                 y2 = y1 + self.velocity_lane_height
         else:
-            y1 = self.pitch_to_y(p2)
-            y2 = self.pitch_to_y(p1) + self.note_height
+            p_hi = max(p1, p2)
+            p_lo = min(p1, p2)
+
+            y1 = self.pitch_to_y(p_hi)
+            y2 = self.pitch_to_y(p_lo) + self.note_height
+
+            if (
+                self.selection_mode and
+                getattr(self, "_selection_cursor_y", None) is not None
+            ):
+                grid_top = self.pitch_to_y(self.max_pitch)
+                grid_bottom = (
+                    self.pitch_to_y(self.min_pitch) +
+                    self.note_height
+                )
+                cursor_y = min(
+                    self._selection_cursor_y,
+                    self.height() - self.bottom_height - 1
+                )
+                cursor_y = max(
+                    grid_top,
+                    min(grid_bottom, cursor_y)
+                )
+
+                if self.selection_end[1] > self.selection_start[1]:
+                    y1 = cursor_y
+                elif self.selection_end[1] < self.selection_start[1]:
+                    y2 = cursor_y
 
         painter.setPen(
             QPen(

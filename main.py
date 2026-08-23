@@ -43,7 +43,7 @@ from module.spectrum import SpectrumData
 from module.midi import MidiData, Note, PedalEvent
 from module.piano_roll import PianoRoll
 from module.midiout import list_ports
-from module.settings import load_value, save_value
+from module.settings import load_value, save_value, delete_value
 from module.discord_rpc import DiscordRPC
 
 DEFAULT_SHORTCUTS = {
@@ -60,8 +60,8 @@ DEFAULT_SHORTCUTS = {
 
 def get_shortcut(key):
     val = load_value(f"shortcut_{key}")
-    if val is not None:
-        return val
+    if val:
+        return str(val)
     return DEFAULT_SHORTCUTS.get(key, "")
 
 class ShortcutDialog(QDialog):
@@ -110,7 +110,10 @@ class ShortcutDialog(QDialog):
     def apply_shortcuts(self):
         for key, edit in self.edits.items():
             val = edit.keySequence().toString()
-            save_value(f"shortcut_{key}", val)
+            if val:
+                save_value(f"shortcut_{key}", val)
+            else:
+                delete_value(f"shortcut_{key}")
 
 class SettingsDialog(QDialog):
     def __init__(self, parent=None, current="internal"):
@@ -191,6 +194,9 @@ class SettingsDialog(QDialog):
         dlg = ShortcutDialog(self)
         if dlg.exec() == QDialog.Accepted:
             dlg.apply_shortcuts()
+            main = self.parent()
+            if main is not None and hasattr(main, "update_shortcuts"):
+                main.update_shortcuts()
 
     def accept(self):
         save_value("auto_backup_enabled", "1" if self.backup_cb.isChecked() else "0")
