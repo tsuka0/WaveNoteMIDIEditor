@@ -404,7 +404,18 @@ class AudioData:
             zi_low = np.vstack((zi_low, zi_low)).T
             zi_high = scipy.signal.lfilter_zi(self.b_high, self.a_high)
             zi_high = np.vstack((zi_high, zi_high)).T
-            
+
+            if gen != self._play_gen:
+                return
+
+            # 準備(ノートキャッシュ構築・デバイス初期化)を
+            # 再生時間に含めないよう、出力開始直前に時計を合わせ直す。
+            # これがないと play() 呼び出しからの経過時間で位置が先行し、
+            # 音の出始めにプレイヘッドが瞬間移動して見える。
+            self._started_at = time.perf_counter()
+
+            self._render_progress = 0.0
+
             stream.start()
 
             while (
@@ -528,6 +539,28 @@ class AudioData:
 
                 if peak > 0.98:
                     block /= peak
+
+                # 先書きを数ブロック分に抑える。デバイスバッファが空いている
+                # 初期に一気に書き込むと _render_progress が可聴位置より大幅に
+                # 先行し、プレイヘッドが瞬間移動して見えるため。
+                max_ahead = block_size * 3
+
+                ahead = (
+                    sample_position +
+                    block_size -
+                    (
+                        time.perf_counter() -
+                        self._started_at -
+                        self._latency
+                    ) *
+                    sample_rate
+                )
+
+                if ahead > max_ahead:
+                    time.sleep(
+                        (ahead - max_ahead) /
+                        sample_rate
+                    )
 
                 stream.write(block)
 
@@ -1402,6 +1435,8 @@ class AudioData:
     def clear(self):
         self.stop()
         self.y = None
+        self.y_raw = None
+        self.y_mono = None
         self.sr = 44100
         self.offset = 0.0
         self._start_position = 0.0

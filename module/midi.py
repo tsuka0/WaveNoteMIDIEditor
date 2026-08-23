@@ -586,7 +586,10 @@ class MidiData:
         cum_measure = [0]
 
         for i in range(len(sigs) - 1):
-            num = max(1, int(sigs[i][1]))
+            bar = self.bar_length_beats(
+                sigs[i][1],
+                sigs[i][2]
+            )
 
             seg_beats = (
                 self.time_to_beat(sigs[i + 1][0]) -
@@ -595,9 +598,12 @@ class MidiData:
 
             cum_measure.append(
                 cum_measure[-1] +
-                int(
-                    round(
-                        seg_beats / num
+                max(
+                    0,
+                    int(
+                        round(
+                            seg_beats / bar
+                        )
                     )
                 )
             )
@@ -633,6 +639,12 @@ class MidiData:
         self.mutation_version += 1
         self._notes_cache = None
         self._notes_cache_version = -1
+
+    def bar_length_beats(self, num, den):
+        """1小節の長さを四分音符ビート単位で返す (4/4=4.0, 3/4=3.0, 3/8=1.5, 6/8=3.0)"""
+        num = max(1, int(num))
+        den = max(1, int(den))
+        return num * 4.0 / den
 
     def time_sig_at(self, time):
         self._ensure_caches()
@@ -676,6 +688,16 @@ class MidiData:
             int(sigs[i][1])
         )
 
+        den = max(
+            1,
+            int(sigs[i][2])
+        )
+
+        bar = self.bar_length_beats(num, den)
+
+        # 拍子の1拍の長さ(四分音符ビート単位、例: 3/8なら0.5)
+        unit = 4.0 / den
+
         seg_start = self.time_to_beat(
             sigs[i][0]
         )
@@ -690,10 +712,19 @@ class MidiData:
             off = float(snapped)
 
         return (
-            self._sig_cum_measure[i] + int(off // num),
-            int(off) % num,
+            self._sig_cum_measure[i] + int(off // bar),
+            int(round(off / unit)) % num,
             num
         )
+
+    def segment_start_measure(self, index):
+        """拍子セグメント開始時点の累積小節数を返す"""
+        self._ensure_caches()
+
+        if 0 <= index < len(self._sig_cum_measure):
+            return self._sig_cum_measure[index]
+
+        return 0
 
     def tempo_at(self, time):
         self._ensure_caches()
@@ -993,6 +1024,11 @@ class MidiData:
 
             prev_tick = tick
 
+        # トラックに設定されたチャンネルを尊重して出力する。
+        # 未設定(重複)の場合のみ空きチャンネルを自動割り当てする
+        # (自動割り当てではチャンネル9=GMドラムを避ける)
+        used_channels = set()
+
         for track_idx, track in enumerate(self.tracks):
             if not track.notes and not track.pedals:
                 continue
@@ -1009,10 +1045,22 @@ class MidiData:
                     )
                 )
 
-            # Assign a unique channel per track, skipping channel 9 (drums in GM)
-            export_channel = track_idx % 15
-            if export_channel >= 9:
-                export_channel += 1
+            export_channel = getattr(track, "channel", 0)
+
+            if (
+                not isinstance(export_channel, int) or
+                not (0 <= export_channel <= 15) or
+                export_channel in used_channels
+            ):
+                export_channel = next(
+                    (
+                        c for c in range(16)
+                        if c != 9 and c not in used_channels
+                    ),
+                    0
+                )
+
+            used_channels.add(export_channel)
 
             events = []
 
@@ -1072,6 +1120,24 @@ class MidiData:
 
             current_tick = 0
 
+            track_channel = getattr(track, "channel", export_channel)
+
+            # ノートが出力に使うチャンネルを決定する:
+            # - トラックの設定と異なるチャンネルを持つノーツはそのチャンネルを
+            #   尊重する(1トラック内の複数チャンネルデータを保護)
+            # - それ以外はトラックに割り当てられたチャンネルを使用する
+            def resolve_note_channel(payload):
+                ch = getattr(payload, "channel", None)
+
+                if (
+                    not isinstance(ch, int) or
+                    not (0 <= ch <= 15) or
+                    ch == track_channel
+                ):
+                    return export_channel
+
+                return ch
+
             for tick, event_type, payload in events:
                 delta = max(
                     0,
@@ -1086,7 +1152,7 @@ class MidiData:
                             "note_on",
                             note=max(0, min(127, payload.pitch)),
                             velocity=max(0, min(127, payload.velocity)),
-                            channel=export_channel,
+                            channel=resolve_note_channel(payload),
                             time=delta
                         )
                     )
@@ -1110,7 +1176,7 @@ class MidiData:
                             "note_off",
                             note=max(0, min(127, payload.pitch)),
                             velocity=0,
-                            channel=export_channel,
+                            channel=resolve_note_channel(payload),
                             time=delta
                         )
                     )

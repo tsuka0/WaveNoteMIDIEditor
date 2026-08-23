@@ -1476,6 +1476,12 @@ class PianoRoll(QWidget):
             return
 
         if x < self.left_width:
+            if y < self.pitch_to_y(self.max_pitch) or y >= (
+                self.pitch_to_y(self.min_pitch) +
+                self.note_height
+            ):
+                return
+
             pitch = self.y_to_pitch(y)
 
             self.preview_pitch(
@@ -1489,6 +1495,13 @@ class PianoRoll(QWidget):
         if in_rect and self.selected_notes and not getattr(self, "selection_in_lane", False) and not getattr(self, "selection_in_pedal", False):
             if self.audio.playing and not on_right_edge:
                 return
+
+            # Ctrlドラッグで選択範囲を複製する
+            ctrl_duplicate = (
+                not on_right_edge and
+                bool(event.modifiers() & Qt.ControlModifier)
+            )
+
             self.midi.push_undo()
             self.drag_start = QPointF(x, y)
             self.press_moved = False
@@ -1497,6 +1510,12 @@ class PianoRoll(QWidget):
                 self.drag_mode = "resize"
             else:
                 self.drag_mode = "move"
+                if ctrl_duplicate:
+                    clones = self._duplicate_selected_notes(
+                        self.selected_notes
+                    )
+                    if clones:
+                        self.selected_notes = clones
             self.drag_original_notes = [
                 (n, n.start, n.pitch, n.duration)
                 for n in self.selected_notes
@@ -1529,7 +1548,37 @@ class PianoRoll(QWidget):
             if self.audio.playing and not is_resize:
                 return
 
+            # Ctrlドラッグでノーツを複製する
+            ctrl_duplicate = (
+                not is_resize and
+                bool(event.modifiers() & Qt.ControlModifier)
+            )
+
+            clicked_note = note
+
+            group_drag = (
+                note in self.selected_notes and
+                len(self.selected_notes) > 1
+            )
+
             self.midi.push_undo()
+
+            if ctrl_duplicate:
+                if group_drag:
+                    src = list(self.selected_notes)
+                else:
+                    src = [clicked_note]
+
+                clones = self._duplicate_selected_notes(src)
+                if clones:
+                    idx = next(
+                        i for i, s in enumerate(src)
+                        if s is clicked_note
+                    )
+                    note = clones[idx]
+
+                    if group_drag:
+                        self.selected_notes = clones
 
             self.drag_note = note
 
@@ -1580,6 +1629,15 @@ class PianoRoll(QWidget):
             return
 
         if self.midi.filter_track is None or self.audio.playing:
+            return
+
+        grid_top = self.pitch_to_y(self.max_pitch)
+        grid_bottom = (
+            self.pitch_to_y(self.min_pitch) +
+            self.note_height
+        )
+
+        if y < grid_top or y >= grid_bottom:
             return
 
         start = self.snap_time(
@@ -2612,6 +2670,12 @@ class PianoRoll(QWidget):
         else:
             if not self.selected_notes:
                 return
+            # 全トラック表示での貼り付け時に所属トラックを保持できるよう、
+            # 現在の所属トラック情報をコピー前に更新する
+            for n in self.selected_notes:
+                t_idx = self._note_track_index(n)
+                if t_idx is not None:
+                    n._original_track = t_idx
             self.clipboard_notes = self.midi.copy_notes(self.selected_notes)
             self.clipboard_pedals = []
 
@@ -2715,6 +2779,35 @@ class PianoRoll(QWidget):
         self.selection_rect = None
 
         self.update()
+
+    def _duplicate_selected_notes(
+        self,
+        source_notes
+    ):
+        """選択中のノーツを同じ位置に複製し、複製したノーツのリストを返す"""
+        self._ensure_note_cache()
+
+        placements = []
+        for n in source_notes:
+            t_idx = self._note_track_index(n)
+            if t_idx is None or not (0 <= t_idx < len(self.midi.tracks)):
+                continue
+            placements.append((n, t_idx))
+
+        if not placements:
+            return None
+
+        clones = []
+        for n, t_idx in placements:
+            new_note = n.clone()
+            new_note._original_track = t_idx
+            self.midi.tracks[t_idx].notes.append(new_note)
+            clones.append(new_note)
+
+        self.midi.sort()
+        self.midi._bump()
+
+        return clones
 
     def _note_track_index(
         self,
@@ -4005,12 +4098,63 @@ class PianoRoll(QWidget):
             60.0 / bpm
         ) / self.seconds_per_pixel
 
-        draw_sub = (
-            beat_px * 0.25 >= 3.0
+        # 拍子の分母に応じたグリッド単位(四分音符ビート単位)
+        # 例: 4/4=1.0, 3/4=1.0, 6/8=0.5, 3/8=0.5, x/16=0.25
+        sigs_all = self.midi.time_signatures
+
+        segments = []
+
+        for i, (t, num, den) in enumerate(sigs_all):
+            ss = self.time_signature_start_beat(
+                t
+            )
+
+            if i + 1 < len(sigs_all):
+                se = self.time_signature_start_beat(
+                    sigs_all[i + 1][0]
+                )
+            else:
+                se = float("inf")
+
+            if se <= ss:
+                continue
+
+            unit = self.midi.bar_length_beats(
+                1,
+                den
+            )
+
+            segments.append(
+                (
+                    ss,
+                    se,
+                    unit
+                )
+            )
+
+        visible_segments = [
+            (
+                ss,
+                se,
+                u
+            )
+            for ss, se, u in segments
+            if se > beat_start and
+            ss < beat_end
+        ]
+
+        unit_first = next(
+            (
+                u
+                for _, _, u in visible_segments
+            ),
+            1.0
         )
 
-        draw_beat = (
-            beat_px >= 3.0
+        unit_px = unit_first * beat_px
+
+        draw_unit = (
+            unit_px >= 3.0
         )
 
         note_bottom = (
@@ -4019,7 +4163,6 @@ class PianoRoll(QWidget):
         )
 
         b0 = math.ceil(beat_start)
-        b1 = math.floor(beat_end)
 
         linear = True
 
@@ -4030,16 +4173,6 @@ class PianoRoll(QWidget):
             ):
                 linear = False
                 break
-
-        tile_w = int(
-            round(beat_px)
-        )
-
-        use_tile = (
-            draw_beat and
-            linear and
-            abs(beat_px - tile_w) < 1e-9
-        )
 
         if linear:
             x0 = self.time_to_x(
@@ -4063,125 +4196,39 @@ class PianoRoll(QWidget):
                     )
                 )
 
-        if use_tile:
-            height = (
-                note_bottom -
-                self.top_height
-            )
-
-            if height > 0:
-                tile = QImage(
-                    tile_w,
-                    height,
-                    QImage.Format.Format_ARGB32_Premultiplied
-                )
-
-                tile.fill(QColor(0, 0, 0, 0))
-
-                tp = QPainter(tile)
-
-                if draw_sub:
-                    for off in (0.25, 0.5, 0.75):
-                        c = int(
-                            off * tile_w
-                        )
-
-                        tp.fillRect(
-                            c,
-                            0,
-                            1,
-                            height,
-                            QColor(
-                                125,
-                                125,
-                                140,
-                                110
-                            )
-                        )
-
-                tp.fillRect(
-                    0,
-                    0,
-                    1,
-                    height,
+        if draw_unit:
+            painter.setPen(
+                QPen(
                     QColor(
                         170,
                         170,
                         180,
                         165
+                    ),
+                    1
+                )
+            )
+
+            for ss, se, u in visible_segments:
+                z = min(se, beat_end)
+
+                k0 = max(
+                    0,
+                    math.ceil(
+                        (
+                            beat_start -
+                            ss
+                        ) / u - 1e-9
                     )
                 )
 
-                tp.end()
-
-                first_x = line_x(b0)
-
-                start = math.floor(
-                    first_x
+                k1 = math.floor(
+                    (z - ss) / u +
+                    1e-9
                 )
 
-                rect_x = (
-                    start -
-                    (start // tile_w) * tile_w
-                )
-
-                if rect_x > 0:
-                    rect_x -= tile_w
-
-                painter.drawTiledPixmap(
-                    rect_x,
-                    self.top_height,
-                    self.width() - rect_x,
-                    height,
-                    QPixmap.fromImage(tile)
-                )
-
-        else:
-            if draw_sub:
-                painter.setPen(
-                    QPen(
-                        QColor(
-                            125,
-                            125,
-                            140,
-                            110
-                        ),
-                        1
-                    )
-                )
-
-                for b in range(b0, b1 + 1):
-                    for off in (0.25, 0.5, 0.75):
-                        x = line_x(b + off)
-
-                        if x < self.left_width:
-                            continue
-
-                        if x > self.width():
-                            break
-
-                        painter.drawLine(
-                            int(x),
-                            self.top_height,
-                            int(x),
-                            note_bottom
-                        )
-
-            if draw_beat:
-                painter.setPen(
-                    QPen(
-                        QColor(
-                            170,
-                            170,
-                            180,
-                            165
-                        ),
-                        1
-                    )
-                )
-
-                for b in range(b0, b1 + 1):
-                    x = line_x(b)
+                for k in range(k0, k1 + 1):
+                    x = line_x(ss + k * u)
 
                     if x < self.left_width:
                         continue
@@ -4210,8 +4257,9 @@ class PianoRoll(QWidget):
 
         sigs = self.midi.time_signatures
 
-        for i, (t, num, _den) in enumerate(sigs):
-            num = max(1, int(num))
+        for i, (t, num, den) in enumerate(sigs):
+            # 分母を反映した小節長(四分音符ビート単位、例: 3/8=1.5)
+            bar = self.midi.bar_length_beats(num, den)
 
             seg_start = self.time_signature_start_beat(
                 t
@@ -4233,7 +4281,7 @@ class PianoRoll(QWidget):
                     (
                         beat_start -
                         seg_start
-                    ) / num
+                    ) / bar - 1e-9
                 )
             )
 
@@ -4241,11 +4289,11 @@ class PianoRoll(QWidget):
                 (
                     min(seg_end, beat_end) -
                     seg_start
-                ) / num
+                ) / bar + 1e-9
             )
 
             for k in range(k0, k1 + 1):
-                b = seg_start + k * num
+                b = seg_start + k * bar
 
                 x = line_x(b)
 
@@ -4960,7 +5008,48 @@ class PianoRoll(QWidget):
             60.0 / bpm
         ) / self.seconds_per_pixel
 
-        if beat_px >= 3.0:
+        # 拍子の分母に応じたグリッド単位で目盛りを描画
+        sigs_tl = self.midi.time_signatures
+
+        tl_segments = []
+
+        for i, (t, num, den) in enumerate(sigs_tl):
+            ss = self.time_signature_start_beat(
+                t
+            )
+
+            if i + 1 < len(sigs_tl):
+                se = self.time_signature_start_beat(
+                    sigs_tl[i + 1][0]
+                )
+            else:
+                se = float("inf")
+
+            if se <= ss:
+                continue
+
+            tl_segments.append(
+                (
+                    ss,
+                    se,
+                    self.midi.bar_length_beats(
+                        1,
+                        den
+                    )
+                )
+            )
+
+        unit_tl = next(
+            (
+                u
+                for ss, se, u in tl_segments
+                if se > beat_start and
+                ss < beat_end
+            ),
+            1.0
+        )
+
+        if unit_tl * beat_px >= 3.0:
             painter.setPen(
                 QPen(
                     QColor(
@@ -4973,30 +5062,43 @@ class PianoRoll(QWidget):
                 )
             )
 
-            for b in range(
-                math.ceil(beat_start),
-                math.floor(beat_end) + 1
-            ):
-                t = self.midi.beat_to_time(
-                    b
-                )
+            for ss, se, u in tl_segments:
+                z = min(se, beat_end)
 
-                x = self.time_to_x(
-                    t
-                )
-
-                if x < self.left_width:
-                    continue
-
-                if x > self.width():
-                    break
-
-                painter.drawLine(
-                    int(x),
+                k0 = max(
                     0,
-                    int(x),
-                    self.top_height
+                    math.ceil(
+                        (
+                            beat_start -
+                            ss
+                        ) / u - 1e-9
+                    )
                 )
+
+                k1 = math.floor(
+                    (z - ss) / u +
+                    1e-9
+                )
+
+                for k in range(k0, k1 + 1):
+                    x = self.time_to_x(
+                        self.midi.beat_to_time(
+                            ss + k * u
+                        )
+                    )
+
+                    if x < self.left_width:
+                        continue
+
+                    if x > self.width():
+                        break
+
+                    painter.drawLine(
+                        int(x),
+                        0,
+                        int(x),
+                        self.top_height
+                    )
 
         painter.setPen(
             QPen(
@@ -5012,8 +5114,9 @@ class PianoRoll(QWidget):
 
         sigs = self.midi.time_signatures
 
-        for i, (t, num, _den) in enumerate(sigs):
-            num = max(1, int(num))
+        for i, (t, num, den) in enumerate(sigs):
+            # 分母を反映した小節長(四分音符ビート単位、例: 3/8=1.5)
+            bar = self.midi.bar_length_beats(num, den)
 
             seg_start = self.time_signature_start_beat(
                 t
@@ -5035,7 +5138,7 @@ class PianoRoll(QWidget):
                     (
                         beat_start -
                         seg_start
-                    ) / num
+                    ) / bar - 1e-9
                 )
             )
 
@@ -5043,11 +5146,11 @@ class PianoRoll(QWidget):
                 (
                     min(seg_end, beat_end) -
                     seg_start
-                ) / num
+                ) / bar + 1e-9
             )
 
             for k in range(k0, k1 + 1):
-                b = seg_start + k * num
+                b = seg_start + k * bar
 
                 t_m = self.midi.beat_to_time(
                     b
@@ -5070,37 +5173,69 @@ class PianoRoll(QWidget):
                     self.top_height
                 )
 
-        stride = max(
-            1,
-            int(
-                round(
-                    80.0 / max(beat_px, 1.0)
+        # 小節番号ラベル: 拍子ごとの小節境界を直接たどり、
+        # ズームに応じて間引きして描画する
+        last_label_x = float("-inf")
+
+        for i, (t_sec, num, den) in enumerate(sigs):
+            bar = self.midi.bar_length_beats(num, den)
+
+            seg_start = self.time_signature_start_beat(t_sec)
+
+            if i + 1 < len(sigs):
+                seg_end = self.time_signature_start_beat(
+                    sigs[i + 1][0]
+                )
+            else:
+                seg_end = beat_end
+
+            if seg_end <= seg_start:
+                continue
+
+            label_every = max(
+                1,
+                int(
+                    round(
+                        80.0 /
+                        max(bar * beat_px, 1.0)
+                    )
                 )
             )
-        )
 
-        b = (
-            math.floor(
-                beat_start /
-                stride
-            ) *
-            stride
-        )
-
-        beat_number = int(
-            b
-        )
-
-        while b <= beat_end:
-            t = self.midi.beat_to_time(
-                b
+            k0 = max(
+                0,
+                math.ceil(
+                    (beat_start - seg_start) / bar - 1e-9
+                )
             )
 
-            x = self.time_to_x(
-                t
+            k1 = math.floor(
+                (
+                    min(seg_end, beat_end) -
+                    seg_start
+                ) / bar + 1e-9
             )
 
-            if x >= self.left_width:
+            base_measure = self.midi.segment_start_measure(i)
+
+            for k in range(k0, k1 + 1):
+                if k % label_every != 0:
+                    continue
+
+                t_m = self.midi.beat_to_time(
+                    seg_start + k * bar
+                )
+
+                x = self.time_to_x(t_m)
+
+                if x < self.left_width:
+                    continue
+
+                if x - last_label_x < 4.0:
+                    continue
+
+                last_label_x = x
+
                 painter.setPen(
                     QPen(
                         QColor(
@@ -5111,22 +5246,17 @@ class PianoRoll(QWidget):
                     )
                 )
 
-                m, b_in_m, _ = self.midi.measure_beat(t)
-                if b_in_m == 0:
-                    painter.drawText(
-                        int(x + 4),
-                        14,
-                        str(m + 1)
-                    )
+                painter.drawText(
+                    int(x + 4),
+                    14,
+                    str(base_measure + k + 1)
+                )
 
-                    painter.drawText(
-                        int(x + 4),
-                        27,
-                        f"{t:.2f}s"
-                    )
-
-            b += stride
-            beat_number += stride
+                painter.drawText(
+                    int(x + 4),
+                    27,
+                    f"{t_m:.2f}s"
+                )
 
         painter.setPen(
             QPen(
@@ -5428,6 +5558,44 @@ class PianoRoll(QWidget):
             visible_end
         )
 
+        bpm_lane = self.midi.tempo_at(
+            visible_start
+        )
+
+        beat_px_lane = (
+            60.0 / bpm_lane
+        ) / self.seconds_per_pixel
+
+        sigs_ln = self.midi.time_signatures
+
+        ln_segments = []
+
+        for i, (t, num, den) in enumerate(sigs_ln):
+            ss = self.time_signature_start_beat(
+                t
+            )
+
+            if i + 1 < len(sigs_ln):
+                se = self.time_signature_start_beat(
+                    sigs_ln[i + 1][0]
+                )
+            else:
+                se = float("inf")
+
+            if se <= ss:
+                continue
+
+            ln_segments.append(
+                (
+                    ss,
+                    se,
+                    self.midi.bar_length_beats(
+                        1,
+                        den
+                    )
+                )
+            )
+
         painter.setPen(
             QPen(
                 QColor(
@@ -5440,26 +5608,46 @@ class PianoRoll(QWidget):
             )
         )
 
-        for b in range(
-            math.ceil(beat_start),
-            math.floor(beat_end) + 1
-        ):
-            x = self.time_to_x(
-                self.midi.beat_to_time(b)
-            )
+        for ss, se, u in ln_segments:
+            z = min(se, beat_end)
 
-            if x < self.left_width:
+            if u * beat_px_lane < 3.0:
                 continue
 
-            if x > self.width():
-                break
-
-            painter.drawLine(
-                int(x),
-                top,
-                int(x),
-                bottom
+            k0 = max(
+                0,
+                math.ceil(
+                    (
+                        beat_start -
+                        ss
+                    ) / u - 1e-9
+                )
             )
+
+            k1 = math.floor(
+                (z - ss) / u +
+                1e-9
+            )
+
+            for k in range(k0, k1 + 1):
+                x = self.time_to_x(
+                    self.midi.beat_to_time(
+                        ss + k * u
+                    )
+                )
+
+                if x < self.left_width:
+                    continue
+
+                if x > self.width():
+                    break
+
+                painter.drawLine(
+                    int(x),
+                    top,
+                    int(x),
+                    bottom
+                )
 
         painter.setPen(
             QPen(
@@ -5475,8 +5663,9 @@ class PianoRoll(QWidget):
 
         sigs = self.midi.time_signatures
 
-        for i, (t, num, _den) in enumerate(sigs):
-            num = max(1, int(num))
+        for i, (t, num, den) in enumerate(sigs):
+            # 分母を反映した小節長(四分音符ビート単位、例: 3/8=1.5)
+            bar = self.midi.bar_length_beats(num, den)
 
             seg_start = self.time_signature_start_beat(t)
 
@@ -5496,7 +5685,7 @@ class PianoRoll(QWidget):
                     (
                         beat_start -
                         seg_start
-                    ) / num
+                    ) / bar - 1e-9
                 )
             )
 
@@ -5504,13 +5693,13 @@ class PianoRoll(QWidget):
                 (
                     min(seg_end, beat_end) -
                     seg_start
-                ) / num
+                ) / bar + 1e-9
             )
 
             for k in range(k0, k1 + 1):
                 x = self.time_to_x(
                     self.midi.beat_to_time(
-                        seg_start + k * num
+                        seg_start + k * bar
                     )
                 )
 

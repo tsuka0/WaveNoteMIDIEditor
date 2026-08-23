@@ -43,7 +43,7 @@ from module.spectrum import SpectrumData
 from module.midi import MidiData, Note, PedalEvent
 from module.piano_roll import PianoRoll
 from module.midiout import list_ports
-from module.settings import load_value, save_value, delete_value
+from module.settings import load_value, save_value, delete_value, load_last_dir, save_last_dir_from_path
 from module.discord_rpc import DiscordRPC
 
 DEFAULT_SHORTCUTS = {
@@ -1265,6 +1265,7 @@ class MainWindow(QMainWindow):
             return False
 
         self._project_path = path
+        save_last_dir_from_path(path)
         self._mark_project_saved()
         return True
 
@@ -1277,7 +1278,7 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getSaveFileName(
             self,
             "プロジェクトを保存",
-            "",
+            load_last_dir(),
             "WaveNote Project (*.wnp);;All Files (*)"
         )
 
@@ -1298,6 +1299,8 @@ class MainWindow(QMainWindow):
                 f"プロジェクトファイルが見つかりません:\n{path}"
             )
             return
+
+        save_last_dir_from_path(path)
 
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -1605,7 +1608,7 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(
             self,
             "オーディオを開く",
-            "",
+            load_last_dir(),
             "Audio Files (*.wav *.mp3 *.flac *.ogg *.m4a);;All Files (*)"
         )
 
@@ -1621,6 +1624,8 @@ class MainWindow(QMainWindow):
                 f"音声ファイルが見つかりません:\n{path}"
             )
             return
+
+        save_last_dir_from_path(path)
 
         val, ok = QInputDialog.getDouble(
             self,
@@ -1725,7 +1730,7 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(
             self,
             "プロジェクトを開く",
-            "",
+            load_last_dir(),
             "WaveNote Project (*.wnp);;All Files (*)"
         )
 
@@ -1736,7 +1741,7 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(
             self,
             "MIDIを開く",
-            "",
+            load_last_dir(),
             "MIDI Files (*.mid *.midi)"
         )
 
@@ -1752,6 +1757,8 @@ class MainWindow(QMainWindow):
                 f"MIDIファイルが見つかりません:\n{path}"
             )
             return
+
+        save_last_dir_from_path(path)
 
         try:
             self.midi.load(
@@ -1802,12 +1809,14 @@ class MainWindow(QMainWindow):
         path, selected_filter = QFileDialog.getSaveFileName(
             self,
             "書き出しを保存",
-            "",
+            load_last_dir(),
             "MIDI Files (*.mid *.midi);;WAV Files (*.wav)"
         )
 
         if not path:
             return
+
+        save_last_dir_from_path(path)
 
         try:
             if selected_filter == "WAV Files (*.wav)" or path.lower().endswith(".wav"):
