@@ -1,4 +1,4 @@
-import os
+﻿import os
 import time
 import sys
 import ctypes
@@ -305,6 +305,22 @@ class MainWindow(QMainWindow):
             str(saved_return).lower() in ("1", "true", "yes", "on")
         )
 
+        saved_mute_midi = load_value(
+            "mute_midi",
+            "0"
+        )
+        self.audio.midi_muted = (
+            str(saved_mute_midi).lower() in ("1", "true", "yes", "on")
+        )
+
+        saved_play_all = load_value(
+            "play_all_tracks",
+            "0"
+        )
+        self.midi.play_all_tracks = (
+            str(saved_play_all).lower() in ("1", "true", "yes", "on")
+        )
+
         saved_threshold = load_value(
             "spectrum_threshold",
             None
@@ -343,6 +359,7 @@ class MainWindow(QMainWindow):
         self.actions = {}
         self.create_menu()
         self.create_toolbar()
+        self.create_status_bar()
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(
@@ -413,8 +430,10 @@ class MainWindow(QMainWindow):
     def auto_backup(self):
         if self._project_path:
             self.save_project()
-            current_time = time.strftime("%H:%M")
-            self.statusBar().showMessage(f"バックアップを保存しました ({current_time})", 5000)
+            current_time = time.strftime("%Y/%m/%d %H:%M:%S")
+            self.status_backup_label.setText(
+                f"バックアップ保存: {current_time}"
+            )
 
     def update_shortcuts(self):
         if not hasattr(self, "actions"):
@@ -425,6 +444,76 @@ class MainWindow(QMainWindow):
                 action.setShortcut(QKeySequence(shortcut_str))
             else:
                 action.setShortcut(QKeySequence())
+
+    def create_status_bar(self):
+        status = self.statusBar()
+        status.setSizeGripEnabled(False)
+
+        self.status_position_label = QLabel(" 00:00.0")
+        self.status_position_label.setMinimumWidth(80)
+        self.status_position_label.setToolTip("現在の再生位置")
+
+        self.status_notes_label = QLabel("ノーツ 0")
+        self.status_notes_label.setMinimumWidth(90)
+        self.status_notes_label.setToolTip("ノーツ数(トラック選択中はそのトラックの数)")
+
+        self.status_bpm_label = QLabel("BPM --.-")
+        self.status_bpm_label.setMinimumWidth(90)
+        self.status_bpm_label.setToolTip("再生位置のテンポ")
+
+        status.addWidget(self.status_position_label)
+        status.addWidget(self.status_notes_label)
+        status.addWidget(self.status_bpm_label)
+
+        self.status_backup_label = QLabel("")
+        self.status_backup_label.setToolTip("自動バックアップの記録")
+
+        status.addPermanentWidget(self.status_backup_label)
+
+    def format_status_time(self, seconds):
+        seconds = max(
+            0.0,
+            float(seconds)
+        )
+
+        minutes = int(seconds // 60)
+
+        rest = seconds - minutes * 60
+
+        return f"{minutes:02d}:{rest:04.1f}"
+
+    def update_status_labels(self):
+        position_text = " " + self.format_status_time(
+            self.editor.play_position
+        )
+        self.status_position_label.setText(position_text)
+
+        if (
+            self.midi.filter_track is not None and
+            0 <= self.midi.filter_track < len(self.midi.tracks)
+        ):
+            notes_count = len(
+                self.midi.tracks[self.midi.filter_track].notes
+            )
+        else:
+            notes_count = sum(
+                len(track.notes)
+                for track in self.midi.tracks
+            )
+
+        notes_text = f"ノーツ {notes_count}"
+
+        if self.status_notes_label.text() != notes_text:
+            self.status_notes_label.setText(notes_text)
+
+        bpm = self.midi.tempo_at(
+            self.editor.play_position
+        )
+
+        bpm_text = f"BPM {bpm:.1f}"
+
+        if self.status_bpm_label.text() != bpm_text:
+            self.status_bpm_label.setText(bpm_text)
 
 
 
@@ -786,6 +875,46 @@ class MainWindow(QMainWindow):
             self.return_to_start_checkbox
         )
 
+        self.mute_midi_checkbox = QCheckBox(
+            "MIDIをミュート"
+        )
+        self.mute_midi_checkbox.setStyleSheet(
+            "QCheckBox { margin-left: 8px; }"
+        )
+        self.mute_midi_checkbox.setToolTip(
+            "再生時にMIDI音を鳴らさず、波形(オーディオ)のみ再生します"
+        )
+        self.mute_midi_checkbox.setChecked(
+            self.audio.midi_muted
+        )
+        self.mute_midi_checkbox.toggled.connect(
+            self.change_mute_midi
+        )
+
+        toolbar.addWidget(
+            self.mute_midi_checkbox
+        )
+
+        self.play_all_tracks_checkbox = QCheckBox(
+            "MIDI全体を再生"
+        )
+        self.play_all_tracks_checkbox.setStyleSheet(
+            "QCheckBox { margin-left: 8px; }"
+        )
+        self.play_all_tracks_checkbox.setToolTip(
+            "単一トラック選択中でも、全トラックのMIDIを鳴らして再生します"
+        )
+        self.play_all_tracks_checkbox.setChecked(
+            self.midi.play_all_tracks
+        )
+        self.play_all_tracks_checkbox.toggled.connect(
+            self.change_play_from_start
+        )
+
+        toolbar.addWidget(
+            self.play_all_tracks_checkbox
+        )
+
         # --- Audio DSP Toolbar (New Row) ---
         self.addToolBarBreak()
         audio_toolbar = self.addToolBar("Audio DSP")
@@ -1017,6 +1146,22 @@ class MainWindow(QMainWindow):
         self.editor.return_to_start_on_stop = checked
         save_value(
             "return_to_start_on_stop",
+            "1" if checked else "0"
+        )
+
+    def change_mute_midi(self, checked):
+        self.audio.midi_muted = checked
+        self.audio.apply_midi_mute()
+        save_value(
+            "mute_midi",
+            "1" if checked else "0"
+        )
+
+    def change_play_from_start(self, checked):
+        self.midi.play_all_tracks = checked
+        self.audio.invalidate_midi_cache()
+        save_value(
+            "play_all_tracks",
             "1" if checked else "0"
         )
 
@@ -1865,6 +2010,8 @@ class MainWindow(QMainWindow):
             previous_position
         ):
             self.editor.update()
+
+        self.update_status_labels()
 
         if hasattr(self.editor, "auto_scroll"):
             self.editor.auto_scroll()

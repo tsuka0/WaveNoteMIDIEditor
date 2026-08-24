@@ -33,6 +33,7 @@ class MidiData:
         self.tempos = [(0.0, 120.0)]
         self.time_signatures = [(0.0, 4, 4)]
         self.filter_track = None
+        self.play_all_tracks = False
         self.beat_phase = 0.0
         self.has_file = False
 
@@ -385,6 +386,7 @@ class MidiData:
 
     def visible_extended_notes(self):
         if (
+            not self.play_all_tracks and
             self.filter_track is not None and
             0 <= self.filter_track < len(self.tracks)
         ):

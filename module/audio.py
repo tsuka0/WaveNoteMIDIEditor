@@ -24,6 +24,8 @@ class AudioData:
         self.eq_low = 1.0
         self.eq_mid = 1.0
         self.eq_high = 1.0
+
+        self.midi_muted = False
         
         self.b_low, self.a_low = scipy.signal.butter(
             4,
@@ -546,7 +548,8 @@ class AudioData:
                     active_notes
                 )
 
-                block += midi_block[:, np.newaxis] * 0.35
+                if not self.midi_muted:
+                    block += midi_block[:, np.newaxis] * 0.35
 
                 peak = np.max(np.abs(block))
 
@@ -651,8 +654,14 @@ class AudioData:
             ))
 
         if self.midi is not None:
-            if self.midi.filter_track is not None:
-                index = self.midi.filter_track
+            filter_track = (
+                None
+                if self.midi.play_all_tracks
+                else self.midi.filter_track
+            )
+
+            if filter_track is not None:
+                index = filter_track
                 tracks = [self.midi.tracks[index]] if 0 <= index < len(self.midi.tracks) else []
             else:
                 tracks = self.midi.tracks
@@ -855,10 +864,12 @@ class AudioData:
 
                     try:
                         if kind == "on":
-                            device.note_on(pitch, velocity, channel)
-                            sounding.add((pitch, channel))
+                            if not self.midi_muted:
+                                device.note_on(pitch, velocity, channel)
+                                sounding.add((pitch, channel))
                         elif kind == "pedal":
-                            device.control_change(64, 127 if pitch else 0, channel)
+                            if not self.midi_muted:
+                                device.control_change(64, 127 if pitch else 0, channel)
                         else:
                             device.note_off(pitch, channel)
                             sounding.discard((pitch, channel))
@@ -1444,6 +1455,13 @@ class AudioData:
         self._midi_cache_dirty = True
         self.preview_pitch = None
         self.preview_until = 0.0
+
+    def apply_midi_mute(self):
+        if self.midi_muted and self._midi_out is not None:
+            try:
+                self._midi_out.all_notes_off()
+            except Exception:
+                pass
 
     def clear(self):
         self.stop()
