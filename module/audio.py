@@ -7,6 +7,11 @@ import scipy.signal
 import librosa
 from . import midiout
 
+# 3バンドEQの境界周波数(低/中/高)
+# 中域が広すぎると低域・高域が聞こえにくくなるため狭めに設定する
+EQ_LOW_CROSSOVER_HZ = 400.0
+EQ_HIGH_CROSSOVER_HZ = 2500.0
+
 class AudioData:
     def __init__(self):
         self.y = None
@@ -20,8 +25,16 @@ class AudioData:
         self.eq_mid = 1.0
         self.eq_high = 1.0
         
-        self.b_low, self.a_low = scipy.signal.butter(4, 500 / (self.sr / 2), 'low')
-        self.b_high, self.a_high = scipy.signal.butter(4, 2000 / (self.sr / 2), 'high')
+        self.b_low, self.a_low = scipy.signal.butter(
+            4,
+            EQ_LOW_CROSSOVER_HZ / (self.sr / 2),
+            'low'
+        )
+        self.b_high, self.a_high = scipy.signal.butter(
+            4,
+            EQ_HIGH_CROSSOVER_HZ / (self.sr / 2),
+            'high'
+        )
         
         self._a4_freq = 440.0
 
@@ -195,8 +208,8 @@ class AudioData:
             y_playback = np.vstack((y_mono, y_mono)).T
             
         nyq = 0.5 * self.sr
-        low_cutoff = 250.0 / nyq
-        high_cutoff = 4000.0 / nyq
+        low_cutoff = EQ_LOW_CROSSOVER_HZ / nyq
+        high_cutoff = EQ_HIGH_CROSSOVER_HZ / nyq
         
         self.b_low, self.a_low = scipy.signal.butter(2, low_cutoff, btype='low')
         self.b_high, self.a_high = scipy.signal.butter(2, high_cutoff, btype='high')

@@ -469,34 +469,103 @@ class MidiData:
     def set_filter_track(self, index):
         self.filter_track = index
 
+    def _time_to_beat_mapper(self):
+        self._ensure_caches()
+
+        tempos = list(self.tempos)
+        cum_time = list(self._tempo_cum_time)
+        cum_beat = list(self._tempo_cum_beat)
+        phase = self.beat_phase
+
+        def mapper(time):
+            i = bisect.bisect_right(cum_time, time) - 1
+
+            if i < 0:
+                return phase + time * tempos[0][1] / 60.0
+
+            return (
+                phase +
+                cum_beat[i] +
+                (
+                    time -
+                    cum_time[i]
+                ) *
+                tempos[i][1] /
+                60.0
+            )
+
+        return mapper
+
+    def _apply_tempo_map_change(self, apply):
+        has_content = any(
+            track.notes or track.pedals
+            for track in self.tracks
+        )
+
+        if not has_content:
+            apply()
+            return
+
+        old_time_to_beat = self._time_to_beat_mapper()
+
+        apply()
+
+        for track in self.tracks:
+            for note in track.notes:
+                start_beat = old_time_to_beat(note.start)
+                end_beat = old_time_to_beat(
+                    note.start + note.duration
+                )
+
+                new_start = self.beat_to_time(start_beat)
+
+                note.duration = max(
+                    1e-3,
+                    self.beat_to_time(end_beat) - new_start
+                )
+                note.start = new_start
+
+            for pedal in track.pedals:
+                pedal.time = self.beat_to_time(
+                    old_time_to_beat(pedal.time)
+                )
+
+        self._bump()
+
     def set_base_tempo(self, bpm):
-        self.tempos[0] = (0.0, float(bpm))
-        self.bpm = float(bpm)
-        self._refresh_caches()
+        def apply():
+            self.tempos[0] = (0.0, float(bpm))
+            self.bpm = float(bpm)
+            self._refresh_caches()
+
+        self._apply_tempo_map_change(apply)
 
     def set_beat_phase(self, beats):
         self.beat_phase = float(beats)
 
     def add_tempo(self, time, bpm):
-        time = max(0.0, float(time))
+        def apply():
+            t_new = max(0.0, float(time))
 
-        out = []
-        replaced = False
+            out = []
+            replaced = False
 
-        for t, b in self.tempos:
-            if abs(t - time) < 1e-6:
-                out.append((time, float(bpm)))
-                replaced = True
-            else:
-                out.append((t, b))
+            for t, b in self.tempos:
+                if abs(t - t_new) < 1e-6:
+                    out.append((t_new, float(bpm)))
+                    replaced = True
+                else:
+                    out.append((t, b))
 
-        if not replaced:
-            out.append((time, float(bpm)))
-            out.sort(key=lambda x: x[0])
+            if not replaced:
+                out.append((t_new, float(bpm)))
+                out.sort(key=lambda x: x[0])
 
-        self.tempos = out
-        self.bpm = self.tempos[0][1]
-        self._refresh_caches()
+            self.tempos = out
+            self.bpm = self.tempos[0][1]
+            self._refresh_caches()
+
+        self._apply_tempo_map_change(apply)
 
     def add_time_signature(self, time, numerator, denominator):
         time = max(0.0, float(time))
@@ -521,18 +590,21 @@ class MidiData:
         self._rebuild_sig_cache()
 
     def remove_tempo(self, time):
-        out = [
-            (t, b)
-            for t, b in self.tempos
-            if abs(t - time) >= 1e-6
-        ]
+        def apply():
+            out = [
+                (t, b)
+                for t, b in self.tempos
+                if abs(t - time) >= 1e-6
+            ]
 
-        if not out:
-            return
+            if not out:
+                return
 
-        self.tempos = out
-        self.bpm = self.tempos[0][1]
-        self._refresh_caches()
+            self.tempos = out
+            self.bpm = self.tempos[0][1]
+            self._refresh_caches()
+
+        self._apply_tempo_map_change(apply)
 
     def remove_time_signature(self, time):
         out = [

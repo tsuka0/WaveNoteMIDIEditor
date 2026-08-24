@@ -5,16 +5,33 @@ import threading
 import builtins
 import os
 
+PIPE_DIR = "\\\\.\\pipe\\"
+IPC_PREFIX = "discord-ipc-"
+
 class DiscordRPC:
     def __init__(self, client_id):
         self.client_id = str(client_id)
         self.pipe = None
         self.connected = False
         self._lock = threading.Lock()
-        
-        self._last_connect_attempt = 0
-        self._connect_cooldown = 10.0
+
+        self._next_attempt_time = 0.0
+        self._retry_delay = 10.0
+        self._no_discord_retry_delay = 60.0
         self._last_activity = None
+
+    @staticmethod
+    def _ipc_available():
+        """DiscordのIPCパイプが存在するか(=Discordが起動中か)を調べる。
+        判定できない場合は試行を許可するため True を返す。"""
+        try:
+            names = os.listdir(PIPE_DIR)
+        except OSError:
+            return True
+        return any(name.startswith(IPC_PREFIX) for name in names)
+
+    def _schedule_next_attempt(self, delay):
+        self._next_attempt_time = time.time() + delay
 
     def _read_response(self):
         try:
@@ -38,7 +55,13 @@ class DiscordRPC:
         with self._lock:
             if self.connected:
                 return
-                
+
+        if not self._ipc_available():
+            # Discordが起動していない(オフライン環境など)場合は
+            # パイプを開く試行自体を行わず、再確認を長い間隔で行う
+            self._schedule_next_attempt(self._no_discord_retry_delay)
+            return
+
         for i in range(10):
             pipe_path = f"\\\\.\\pipe\\discord-ipc-{i}"
             try:
@@ -65,12 +88,13 @@ class DiscordRPC:
     def connect_async(self):
         if self.connected:
             return
-            
-        now = time.time()
-        if now - self._last_connect_attempt < self._connect_cooldown:
+
+        if time.time() < self._next_attempt_time:
             return
-            
-        self._last_connect_attempt = now
+
+        # 接続試行の連鎖を防ぐため、まず標準間隔で次回を予約する
+        # (成功時は connected になるため以降の試行は行われない)
+        self._schedule_next_attempt(self._retry_delay)
         t = threading.Thread(target=self._connect_task, daemon=True)
         t.start()
 
@@ -168,5 +192,6 @@ class DiscordRPC:
                         pass
                     self.pipe = None
                 self.connected = False
+                self._next_attempt_time = 0.0
                 
         threading.Thread(target=_close_task, daemon=True).start()

@@ -1,6 +1,5 @@
 import math
 import bisect
-import time
 import numpy as np
 from PySide6.QtWidgets import QWidget, QDialog, QSpinBox, QDoubleSpinBox, QCheckBox, QLabel, QVBoxLayout, QHBoxLayout, QDialogButtonBox, QMenu
 from PySide6.QtCore import Qt, QPointF, QRectF, Signal
@@ -598,198 +597,12 @@ class PianoRoll(QWidget):
 
         self.update()
 
-    def tap_tempo(self):
-        now = time.perf_counter()
-        pos = self.audio.position
-
-        evts = getattr(self, "_tap_evts", None)
-
-        if evts is None:
-            evts = []
-            self._tap_evts = evts
-
-        if evts:
-            gap = now - evts[-1][0]
-
-            if gap > 3.0:
-                evts.clear()
-
-        if not evts:
-            beat_idx = 0.0
-        else:
-            if len(evts) >= 2:
-                intervals = [
-                    evts[i + 1][0] - evts[i][0]
-                    for i in range(len(evts) - 1)
-                ]
-
-                intervals.sort()
-
-                med = intervals[
-                    len(intervals) // 2
-                ]
-            else:
-                med = max(
-                    0.1,
-                    now - evts[-1][0]
-                )
-
-            iv = now - evts[-1][0]
-
-            if iv < med * 0.6:
-                return
-
-            if iv > med * 1.6:
-                beat_idx = (
-                    evts[-1][2] +
-                    max(
-                        2,
-                        round(iv / med)
-                    )
-                )
-            else:
-                beat_idx = evts[-1][2] + 1.0
-
-        evts.append((now, pos, beat_idx))
-
-        if len(evts) > 12:
-            del evts[:-12]
-
-        if len(evts) < 2:
-            return
-
-        xs = [
-            float(e[2])
-            for e in evts
-        ]
-
-        ys = [
-            e[0]
-            for e in evts
-        ]
-
-        poss = [
-            e[1]
-            for e in evts
-        ]
-
-        while True:
-            n = len(xs)
-
-            sx = sum(xs)
-            sy = sum(ys)
-            sxx = sum(x * x for x in xs)
-            sxy = sum(x * y for x, y in zip(xs, ys))
-
-            denom = n * sxx - sx * sx
-
-            if denom <= 0:
-                return
-
-            slope = (n * sxy - sx * sy) / denom
-            intercept = (sy - slope * sx) / n
-
-            if slope <= 0:
-                return
-
-            if n >= 3:
-                worst = max(
-                    range(n),
-                    key=lambda i: abs(
-                        ys[i] -
-                        (intercept + slope * xs[i])
-                    )
-                )
-
-                if (
-                    abs(
-                        ys[worst] -
-                        (intercept + slope * xs[worst])
-                    ) >
-                    0.25 * slope
-                ):
-                    del xs[worst]
-                    del ys[worst]
-                    del poss[worst]
-                    continue
-
-            break
-
-        bpm = 60.0 / slope
-
-        bpm = max(
-            30.0,
-            min(
-                300.0,
-                bpm
-            )
-        )
-
-        bpm = float(round(bpm))
-
-        spread = max(poss) - min(poss)
-
-        if (
-            spread >= 0.3 and
-            len(poss) >= 2
-        ):
-            n = len(poss)
-
-            spx = sum(xs)
-            spy = sum(poss)
-            spxx = sum(x * x for x in xs)
-            spxy = sum(
-                x * p
-                for x, p in zip(xs, poss)
-            )
-
-            sdenom = n * spxx - spx * spx
-
-            if sdenom > 0:
-                slope_p = (
-                    n * spxy -
-                    spx * spy
-                ) / sdenom
-            else:
-                slope_p = 0.0
-
-            if slope_p > 0:
-                c = (spy - slope_p * spx) / n
-            else:
-                c = poss[0] - slope * xs[0]
-        else:
-            c = poss[0] - slope * xs[0]
-
-        phase = -c / slope
-
-        if abs(
-            bpm -
-            self.midi.bpm
-        ) >= 0.5:
-            self.midi.set_base_tempo(bpm)
-            self.bpm = bpm
-            self.marker_edited.emit()
-
-        self.midi.set_beat_phase(phase)
-
-        self.update()
-
     def keyPressEvent(
         self,
         event
     ):
         if event.key() == Qt.Key_Space:
-            if event.modifiers() & Qt.ShiftModifier:
-                if (
-                    self.midi.has_file or
-                    len(self.midi.notes) > 0
-                ):
-                    event.accept()
-                    return
-
-                self.tap_tempo()
-            else:
-                self.toggle_play()
+            self.toggle_play()
             event.accept()
             return
 
@@ -1367,7 +1180,6 @@ class PianoRoll(QWidget):
 
             self.selection_mode = True
             self.selection_rect = None
-            self._selection_cursor_y = y
             
             if y >= lane_top + self.velocity_lane_height:
                 self.selection_start = (
@@ -2018,7 +1830,6 @@ class PianoRoll(QWidget):
                 
                 if self.selection_mode and self.selection_start:
                     lane_top = self.height() - self.bottom_height
-                    self._selection_cursor_y = y
                     self.selection_end = (
                         self.snap_time(
                             self.x_to_time(x),
@@ -2117,7 +1928,6 @@ class PianoRoll(QWidget):
         if self.selection_mode:
             if self.selection_start:
                 lane_top = self.height() - self.bottom_height
-                self._selection_cursor_y = y
                 self.selection_end = (
                     self.snap_time(
                         self.x_to_time(x),
@@ -2228,8 +2038,18 @@ class PianoRoll(QWidget):
                 )
 
         elif self.drag_mode == "resize":
-            original_end = original_start + original_duration
-            
+            if self.drag_original_notes:
+                # 複数ノーツの場合は「選択範囲の右端」を基準にする。
+                # 単一ノーツ時と同じく、つかんだ端がそのままマウスに追従し、
+                # 各ノーツは長さの変化量のみを受け取る
+                original_end = max(
+                    o_start + o_duration
+                    for _, o_start, _, o_duration in
+                    self.drag_original_notes
+                )
+            else:
+                original_end = original_start + original_duration
+
             new_end = self.snap_time(
                 self.x_to_time(x),
                 grid=self.note_length
@@ -2503,7 +2323,6 @@ class PianoRoll(QWidget):
         self.selection_rect = None
         self.last_selection_time_range = None
         self.last_selection_in_pedal = False
-        self._selection_cursor_y = None
 
     def finish_selection(self):
         if not self.selection_start or not self.selection_end:
@@ -4760,31 +4579,9 @@ class PianoRoll(QWidget):
             p_hi = max(p1, p2)
             p_lo = min(p1, p2)
 
+            # 上下端もノート行(音階)にスナップさせる
             y1 = self.pitch_to_y(p_hi)
             y2 = self.pitch_to_y(p_lo) + self.note_height
-
-            if (
-                self.selection_mode and
-                getattr(self, "_selection_cursor_y", None) is not None
-            ):
-                grid_top = self.pitch_to_y(self.max_pitch)
-                grid_bottom = (
-                    self.pitch_to_y(self.min_pitch) +
-                    self.note_height
-                )
-                cursor_y = min(
-                    self._selection_cursor_y,
-                    self.height() - self.bottom_height - 1
-                )
-                cursor_y = max(
-                    grid_top,
-                    min(grid_bottom, cursor_y)
-                )
-
-                if self.selection_end[1] > self.selection_start[1]:
-                    y1 = cursor_y
-                elif self.selection_end[1] < self.selection_start[1]:
-                    y2 = cursor_y
 
         painter.setPen(
             QPen(

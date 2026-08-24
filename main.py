@@ -18,7 +18,6 @@ def get_resource_path(relative_path):
 GZIP_MAGIC = b"\x1f\x8b"
 
 def read_project_json(path):
-    """プロジェクトファイルを読み込む (gzip圧縮 / 従来の平文JSON 両対応)"""
     with open(path, "rb") as f:
         raw = f.read()
 
@@ -58,6 +57,8 @@ from module.piano_roll import PianoRoll
 from module.midiout import list_ports
 from module.settings import load_value, save_value, delete_value, load_last_dir, save_last_dir_from_path
 from module.discord_rpc import DiscordRPC
+
+DISCORD_CLIENT_ID = "1539710543751942214"
 
 DEFAULT_SHORTCUTS = {
     "action_new_project": "Ctrl+N",
@@ -367,11 +368,10 @@ class MainWindow(QMainWindow):
         self.auto_backup_timer.timeout.connect(self.auto_backup)
         self.update_auto_backup_timer()
 
-        self.discord_rpc = DiscordRPC("1539607179135418409")
+        self.discord_rpc = DiscordRPC(DISCORD_CLIENT_ID)
         self.discord_rpc_timer = QTimer(self)
         self.discord_rpc_timer.timeout.connect(self.update_discord_rpc)
         self.discord_rpc_timer.start(5000)
-        import time
         self._discord_start_time = time.time()
         self.update_discord_rpc()
 
@@ -387,13 +387,17 @@ class MainWindow(QMainWindow):
             event.ignore()
 
     def update_discord_rpc(self):
+        rpc = getattr(self, "discord_rpc", None)
+        if rpc is None:
+            return
+
         enabled = load_value("discord_rpc_enabled", "1") == "1"
         if not enabled:
-            if getattr(self, "discord_rpc", None) and self.discord_rpc.connected:
-                self.discord_rpc.close()
+            if rpc.connected:
+                rpc.close()
             return
-            
-        self.discord_rpc.update(
+
+        rpc.update(
             details="WaveNoteMIDIEditor",
             start_time=self._discord_start_time
         )
@@ -747,7 +751,15 @@ class MainWindow(QMainWindow):
                 beats
             )
 
-        self.length_combo.setCurrentIndex(4)
+        # 起動時の実際のノート長(初期値は0.25=16分音符)に選択表示を合わせる
+        self.length_combo.setCurrentIndex(
+            max(
+                0,
+                self.length_combo.findData(
+                    self.editor.note_length
+                )
+            )
+        )
 
         self.length_combo.currentIndexChanged.connect(
             self.change_note_length
@@ -773,133 +785,6 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(
             self.return_to_start_checkbox
         )
-
-        offset_label = QLabel(
-            "  音声オフセット "
-        )
-
-        toolbar.addWidget(
-            offset_label
-        )
-
-        self.offset_box = QDoubleSpinBox()
-
-        self.offset_box.setRange(
-            -60.0,
-            60.0
-        )
-
-        self.offset_box.setDecimals(
-            3
-        )
-
-        self.offset_box.setSingleStep(
-            0.005
-        )
-
-        self.offset_box.setSuffix(
-            " s"
-        )
-
-        self.offset_box.valueChanged.connect(
-            self.change_offset
-        )
-
-        toolbar.addWidget(
-            self.offset_box
-        )
-
-        threshold_label = QLabel(
-            "  スペクトラム閾値 "
-        )
-
-        toolbar.addWidget(
-            threshold_label
-        )
-
-        self.threshold_slider = QSlider(
-            Qt.Horizontal
-        )
-
-        self.threshold_slider.setRange(
-            0,
-            40
-        )
-
-        self.threshold_slider.setValue(
-            int(
-                self.editor.spectrum_threshold *
-                100
-            )
-        )
-
-        self.threshold_slider.setMaximumWidth(150)
-        self.threshold_slider.setMinimumWidth(50)
-        self.threshold_slider.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
-
-        self.threshold_slider.setToolTip(
-            "弱い部分を非表示にする閾値"
-        )
-
-        self.threshold_slider.valueChanged.connect(
-            self.change_threshold
-        )
-
-        toolbar.addWidget(
-            self.threshold_slider
-        )
-
-        sensitivity_label = QLabel(
-            "  スペクトラム感度 "
-        )
-
-        toolbar.addWidget(
-            sensitivity_label
-        )
-
-        self.sensitivity_slider = QSlider(
-            Qt.Horizontal
-        )
-
-        self.sensitivity_slider.setRange(
-            10,
-            100
-        )
-
-        self.sensitivity_slider.setValue(
-            int(
-                self.editor.spectrum_db_range
-            )
-        )
-
-        self.sensitivity_slider.setMaximumWidth(150)
-        self.sensitivity_slider.setMinimumWidth(50)
-        self.sensitivity_slider.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
-
-        self.sensitivity_slider.setToolTip(
-            "感度：低いほど鮮明、高いほど広範囲表示"
-        )
-
-        self.sensitivity_slider.valueChanged.connect(
-            self.change_sensitivity
-        )
-
-        toolbar.addWidget(
-            self.sensitivity_slider
-        )
-
-        volume_label = QLabel("  音声ファイル音量 ")
-        toolbar.addWidget(volume_label)
-
-        self.volume_slider = QSlider(Qt.Horizontal)
-        self.volume_slider.setRange(0, 50)
-        self.volume_slider.setValue(int(self.audio.volume * 100))
-        self.volume_slider.setMaximumWidth(150)
-        self.volume_slider.setMinimumWidth(50)
-        self.volume_slider.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
-        self.volume_slider.setToolTip("音声ファイルの音量")
-        self.volume_slider.valueChanged.connect(self.change_volume)
-        toolbar.addWidget(self.volume_slider)
 
         # --- Audio DSP Toolbar (New Row) ---
         self.addToolBarBreak()
@@ -961,6 +846,66 @@ class MainWindow(QMainWindow):
         self.eq_reset_btn.clicked.connect(self.reset_eq)
         audio_toolbar.addWidget(self.eq_reset_btn)
 
+        # Audio Offset
+        offset_label = QLabel(
+            "  音声オフセット "
+        )
+        audio_toolbar.addWidget(offset_label)
+
+        self.offset_box = QDoubleSpinBox()
+        self.offset_box.setRange(-60.0, 60.0)
+        self.offset_box.setDecimals(3)
+        self.offset_box.setSingleStep(0.005)
+        self.offset_box.setSuffix(" s")
+        self.offset_box.valueChanged.connect(self.change_offset)
+        audio_toolbar.addWidget(self.offset_box)
+
+        # Spectrum Threshold
+        threshold_label = QLabel(
+            "  スペクトラム閾値 "
+        )
+        audio_toolbar.addWidget(threshold_label)
+
+        self.threshold_slider = QSlider(Qt.Horizontal)
+        self.threshold_slider.setRange(0, 40)
+        self.threshold_slider.setValue(int(self.editor.spectrum_threshold * 100))
+        self.threshold_slider.setMaximumWidth(150)
+        self.threshold_slider.setMinimumWidth(50)
+        self.threshold_slider.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
+        self.threshold_slider.setToolTip("弱い部分を非表示にする閾値")
+        self.threshold_slider.valueChanged.connect(self.change_threshold)
+        audio_toolbar.addWidget(self.threshold_slider)
+
+        # Spectrum Sensitivity
+        sensitivity_label = QLabel(
+            "  スペクトラム感度 "
+        )
+        audio_toolbar.addWidget(sensitivity_label)
+
+        self.sensitivity_slider = QSlider(Qt.Horizontal)
+        self.sensitivity_slider.setRange(10, 100)
+        self.sensitivity_slider.setValue(int(self.editor.spectrum_db_range))
+        self.sensitivity_slider.setMaximumWidth(150)
+        self.sensitivity_slider.setMinimumWidth(50)
+        self.sensitivity_slider.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
+        self.sensitivity_slider.setToolTip("感度：低いほど鮮明、高いほど広範囲表示")
+        self.sensitivity_slider.valueChanged.connect(self.change_sensitivity)
+        audio_toolbar.addWidget(self.sensitivity_slider)
+
+        # Audio File Volume
+        volume_label = QLabel("  音声ファイル音量 ")
+        audio_toolbar.addWidget(volume_label)
+
+        self.volume_slider = QSlider(Qt.Horizontal)
+        self.volume_slider.setRange(0, 50)
+        self.volume_slider.setValue(int(self.audio.volume * 100))
+        self.volume_slider.setMaximumWidth(150)
+        self.volume_slider.setMinimumWidth(50)
+        self.volume_slider.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
+        self.volume_slider.setToolTip("音声ファイルの音量")
+        self.volume_slider.valueChanged.connect(self.change_volume)
+        audio_toolbar.addWidget(self.volume_slider)
+
 
     def open_settings(self):
         dialog = SettingsDialog(
@@ -993,12 +938,6 @@ class MainWindow(QMainWindow):
         )
         self.update_auto_backup_timer()
 
-        self.discord_rpc = DiscordRPC("1539710543751942214")
-        self.discord_rpc_timer = QTimer(self)
-        self.discord_rpc_timer.timeout.connect(self.update_discord_rpc)
-        self.discord_rpc_timer.start(5000)
-        import time
-        self._discord_start_time = time.time()
         self.update_discord_rpc()
 
     def refresh_track_combo(self):
