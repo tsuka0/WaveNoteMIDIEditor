@@ -38,13 +38,17 @@ from PySide6.QtWidgets import (
     QProgressDialog,
     QSpinBox,
     QDoubleSpinBox,
+    QLineEdit,
     QSlider,
     QComboBox,
     QPushButton,
     QDialog,
     QDialogButtonBox,
     QVBoxLayout,
+    QHBoxLayout,
     QFormLayout, 
+    QListWidget,
+    QListWidgetItem,
     QKeySequenceEdit,
     QSizePolicy
 )
@@ -88,6 +92,63 @@ def toggle_button_style(checked_color):
         f"QPushButton:checked {{ background-color: {checked_color}; "
         f"border-color: {checked_color}; color: white; font-weight: bold; }}"
     )
+
+AUDIO_PRESETS_KEY = "audio_presets"
+
+CHANNEL_MODE_LABELS = [
+    "ステレオ",
+    "L+R (モノラル)",
+    "L-R (ボーカルキャンセル)",
+    "Lのみ",
+    "Rのみ"
+]
+
+DEFAULT_AUDIO_PRESETS = [
+    {"name": "フラット", "channel": 0, "low": 100, "mid": 100, "high": 100},
+    {"name": "メロディを聞きやすく", "channel": 1, "low": 60, "mid": 145, "high": 115},
+    {"name": "ベースを聞きやすく", "channel": 1, "low": 170, "mid": 80, "high": 55},
+    {"name": "リズムを聞きやすく", "channel": 1, "low": 155, "mid": 65, "high": 150},
+    {"name": "ボーカルを消す", "channel": 2, "low": 100, "mid": 100, "high": 100}
+]
+
+
+def normalize_audio_preset(data):
+    preset = {
+        "name": str(data.get("name", "プリセット")),
+        "channel": int(data.get("channel", 0)),
+        "low": int(data.get("low", 100)),
+        "mid": int(data.get("mid", 100)),
+        "high": int(data.get("high", 100))
+    }
+    preset["name"] = preset["name"] or "プリセット"
+    preset["channel"] = max(0, min(len(CHANNEL_MODE_LABELS) - 1, preset["channel"]))
+    for key in ("low", "mid", "high"):
+        preset[key] = max(0, min(200, preset[key]))
+    return preset
+
+
+def load_audio_presets():
+    raw = load_value(AUDIO_PRESETS_KEY)
+
+    if raw:
+        try:
+            data = json.loads(str(raw))
+            if isinstance(data, list):
+                return [
+                    normalize_audio_preset(item)
+                    for item in data
+                    if isinstance(item, dict)
+                ]
+        except (ValueError, TypeError):
+            pass
+
+    presets = [dict(p) for p in DEFAULT_AUDIO_PRESETS]
+    save_value(
+        AUDIO_PRESETS_KEY,
+        json.dumps(presets, ensure_ascii=False)
+    )
+    return presets
+
 
 class ShortcutDialog(QDialog):
     def __init__(self, parent=None):
@@ -276,6 +337,163 @@ class TrackComboFilter(QObject):
             return True
         return super().eventFilter(obj, event)
 
+class AudioPresetDialog(QDialog):
+    def __init__(self, parent=None, presets=None):
+        super().__init__(parent)
+        self.setWindowTitle("プリセットの管理")
+        self.setMinimumWidth(420)
+
+        self.presets = [dict(p) for p in (presets or [])]
+        self._editing_row = -1
+
+        self.list_widget = QListWidget(self)
+
+        self.name_edit = QLineEdit(self)
+        self.channel_combo = QComboBox(self)
+        self.channel_combo.addItems(CHANNEL_MODE_LABELS)
+
+        self.eq_spins = {}
+        form = QFormLayout()
+        form.addRow("名前", self.name_edit)
+        form.addRow("チャンネル", self.channel_combo)
+
+        for key, label in (
+            ("low", "低域"),
+            ("mid", "中域"),
+            ("high", "高域")
+        ):
+            spin = QSpinBox(self)
+            spin.setRange(0, 200)
+            spin.setSuffix(" %")
+            self.eq_spins[key] = spin
+            form.addRow(label, spin)
+
+        add_btn = QPushButton("新規作成", self)
+        add_btn.clicked.connect(self.add_preset)
+        delete_btn = QPushButton("削除", self)
+        delete_btn.clicked.connect(self.delete_preset)
+
+        btn_box = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel,
+            self
+        )
+        btn_box.accepted.connect(self.accept)
+        btn_box.rejected.connect(self.reject)
+
+        left_layout = QVBoxLayout()
+        left_layout.addWidget(self.list_widget)
+        left_layout.addWidget(add_btn)
+        left_layout.addWidget(delete_btn)
+
+        right_layout = QVBoxLayout()
+        right_layout.addLayout(form)
+        right_layout.addStretch()
+        right_layout.addWidget(btn_box)
+
+        main_layout = QHBoxLayout(self)
+        main_layout.addLayout(left_layout, 1)
+        main_layout.addLayout(right_layout, 1)
+
+        self.list_widget.currentRowChanged.connect(
+            self.on_row_changed
+        )
+        self.name_edit.textChanged.connect(
+            self.on_name_edited
+        )
+
+        for index in range(len(self.presets)):
+            self.list_widget.addItem(self.presets[index]["name"])
+
+        if self.presets:
+            self.list_widget.setCurrentRow(0)
+        else:
+            self.set_form_enabled(False)
+
+    def set_form_enabled(self, enabled):
+        self.name_edit.setEnabled(enabled)
+        self.channel_combo.setEnabled(enabled)
+        for spin in self.eq_spins.values():
+            spin.setEnabled(enabled)
+
+    def commit_form(self):
+        row = self._editing_row
+        if row < 0 or row >= len(self.presets):
+            return
+        preset = self.presets[row]
+        name = self.name_edit.text().strip()
+        if name:
+            preset["name"] = name
+        preset["channel"] = self.channel_combo.currentIndex()
+        for key, spin in self.eq_spins.items():
+            preset[key] = spin.value()
+
+        self.list_widget.item(row).setText(preset["name"])
+
+    def on_row_changed(self, row):
+        self.commit_form()
+        self._editing_row = row
+
+        if row < 0 or row >= len(self.presets):
+            self.set_form_enabled(False)
+            return
+
+        self.set_form_enabled(True)
+        preset = self.presets[row]
+        self.name_edit.setText(preset["name"])
+        self.channel_combo.setCurrentIndex(preset["channel"])
+        for key, spin in self.eq_spins.items():
+            spin.setValue(preset[key])
+
+    def add_preset(self):
+        name = "新規プリセット"
+        names = [p["name"] for p in self.presets]
+
+        if name in names:
+            index = 2
+            while f"{name}{index}" in names:
+                index += 1
+            name = f"{name}{index}"
+
+        base = dict(self.presets[-1]) if self.presets else {
+            "name": name,
+            "channel": 0,
+            "low": 100,
+            "mid": 100,
+            "high": 100
+        }
+        base["name"] = name
+
+        self.presets.append(base)
+        self.list_widget.addItem(name)
+        self.list_widget.setCurrentRow(len(self.presets) - 1)
+        self.name_edit.selectAll()
+        self.name_edit.setFocus()
+
+    def delete_preset(self):
+        row = self.list_widget.currentRow()
+        if row < 0 or row >= len(self.presets):
+            return
+
+        del self.presets[row]
+        self.list_widget.takeItem(row)
+
+        if not self.presets:
+            self._editing_row = -1
+            self.set_form_enabled(False)
+
+    def on_name_edited(self, text):
+        row = self._editing_row
+        if row < 0 or row >= len(self.presets):
+            return
+
+        item = self.list_widget.item(row)
+        if item is not None:
+            item.setText(text)
+
+    def accept(self):
+        self.commit_form()
+        super().accept()
+
 class MainWindow(QMainWindow):
     def __init__(self, initial_file=None):
         super().__init__()
@@ -293,6 +511,8 @@ class MainWindow(QMainWindow):
         self.audio = AudioData()
         self.spectrum = SpectrumData()
         self.midi = MidiData()
+
+        self.audio_presets = load_audio_presets()
 
         self.audio.set_output_device(
             load_value(
@@ -969,11 +1189,29 @@ class MainWindow(QMainWindow):
         audio_toolbar.setMovable(False)
         audio_toolbar.setContextMenuPolicy(Qt.PreventContextMenu)
 
+        # Audio Presets
+        preset_label = QLabel("  プリセット: ")
+        audio_toolbar.addWidget(preset_label)
+
+        self.preset_combo = QComboBox()
+        self.preset_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self.preset_combo.setMaximumWidth(160)
+        self.preset_combo.setToolTip(
+            "チャンネルとEQの組み合わせプリセット。\n"
+            "「現在の設定をプリセット保存...」で追加、"
+            "「プリセットの管理...」で編集・削除できます"
+        )
+        self.preset_combo.currentIndexChanged.connect(
+            self.change_audio_preset
+        )
+        audio_toolbar.addWidget(self.preset_combo)
+        self.rebuild_preset_combo()
+
         # Channel Mode
         channel_label = QLabel("  解析/音声: ")
         audio_toolbar.addWidget(channel_label)
         self.channel_combo = QComboBox()
-        self.channel_combo.addItems(["ステレオ", "L+R (モノラル)", "L-R (ボーカルキャンセル)", "Lのみ", "Rのみ"])
+        self.channel_combo.addItems(CHANNEL_MODE_LABELS)
         self.channel_combo.currentIndexChanged.connect(self.change_channel_mode)
         audio_toolbar.addWidget(self.channel_combo)
         
@@ -987,7 +1225,7 @@ class MainWindow(QMainWindow):
         self.eq_low_slider = QSlider(Qt.Horizontal)
         self.eq_low_slider.setRange(0, 200) # 0.0x to 2.0x
         self.eq_low_slider.setValue(100)
-        self.eq_low_slider.setMaximumWidth(100)
+        self.eq_low_slider.setMaximumWidth(80)
         self.eq_low_slider.setMinimumWidth(30)
         self.eq_low_slider.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
         self.eq_low_slider.valueChanged.connect(self.change_eq)
@@ -999,7 +1237,7 @@ class MainWindow(QMainWindow):
         self.eq_mid_slider = QSlider(Qt.Horizontal)
         self.eq_mid_slider.setRange(0, 200)
         self.eq_mid_slider.setValue(100)
-        self.eq_mid_slider.setMaximumWidth(100)
+        self.eq_mid_slider.setMaximumWidth(80)
         self.eq_mid_slider.setMinimumWidth(30)
         self.eq_mid_slider.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
         self.eq_mid_slider.valueChanged.connect(self.change_eq)
@@ -1011,7 +1249,7 @@ class MainWindow(QMainWindow):
         self.eq_high_slider = QSlider(Qt.Horizontal)
         self.eq_high_slider.setRange(0, 200)
         self.eq_high_slider.setValue(100)
-        self.eq_high_slider.setMaximumWidth(100)
+        self.eq_high_slider.setMaximumWidth(80)
         self.eq_high_slider.setMinimumWidth(30)
         self.eq_high_slider.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
         self.eq_high_slider.valueChanged.connect(self.change_eq)
@@ -1055,49 +1293,51 @@ class MainWindow(QMainWindow):
 
         # Spectrum Threshold
         threshold_label = QLabel(
-            "  スペクトラム閾値 "
+            "  閾値 "
         )
         audio_toolbar.addWidget(threshold_label)
 
         self.threshold_slider = QSlider(Qt.Horizontal)
         self.threshold_slider.setRange(0, 40)
         self.threshold_slider.setValue(int(self.editor.spectrum_threshold * 100))
-        self.threshold_slider.setMaximumWidth(150)
+        self.threshold_slider.setMaximumWidth(110)
         self.threshold_slider.setMinimumWidth(50)
         self.threshold_slider.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
-        self.threshold_slider.setToolTip("弱い部分を非表示にする閾値")
+        self.threshold_slider.setToolTip("スペクトラムの弱い部分を非表示にする閾値")
         self.threshold_slider.valueChanged.connect(self.change_threshold)
         audio_toolbar.addWidget(self.threshold_slider)
 
         # Spectrum Sensitivity
         sensitivity_label = QLabel(
-            "  スペクトラム感度 "
+            "  感度 "
         )
         audio_toolbar.addWidget(sensitivity_label)
 
         self.sensitivity_slider = QSlider(Qt.Horizontal)
         self.sensitivity_slider.setRange(10, 100)
         self.sensitivity_slider.setValue(int(self.editor.spectrum_db_range))
-        self.sensitivity_slider.setMaximumWidth(150)
+        self.sensitivity_slider.setMaximumWidth(110)
         self.sensitivity_slider.setMinimumWidth(50)
         self.sensitivity_slider.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
-        self.sensitivity_slider.setToolTip("感度：低いほど鮮明、高いほど広範囲表示")
+        self.sensitivity_slider.setToolTip("スペクトラム感度：低いほど鮮明、高いほど広範囲表示")
         self.sensitivity_slider.valueChanged.connect(self.change_sensitivity)
         audio_toolbar.addWidget(self.sensitivity_slider)
 
         # Audio File Volume
-        volume_label = QLabel("  音声ファイル音量 ")
+        volume_label = QLabel("  音量 ")
         audio_toolbar.addWidget(volume_label)
 
         self.volume_slider = QSlider(Qt.Horizontal)
         self.volume_slider.setRange(0, 50)
         self.volume_slider.setValue(int(self.audio.volume * 100))
-        self.volume_slider.setMaximumWidth(150)
+        self.volume_slider.setMaximumWidth(110)
         self.volume_slider.setMinimumWidth(50)
         self.volume_slider.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
         self.volume_slider.setToolTip("音声ファイルの音量")
         self.volume_slider.valueChanged.connect(self.change_volume)
         audio_toolbar.addWidget(self.volume_slider)
+
+        self.sync_preset_combo()
 
 
     def open_settings(self):
@@ -1263,11 +1503,13 @@ class MainWindow(QMainWindow):
         self.audio.channel_mode = index
         self.audio.apply_dsp()
         self.update_spectrum()
+        self.sync_preset_combo()
 
     def change_eq(self):
         self.audio.eq_low = self.eq_low_slider.value() / 100.0
         self.audio.eq_mid = self.eq_mid_slider.value() / 100.0
         self.audio.eq_high = self.eq_high_slider.value() / 100.0
+        self.sync_preset_combo()
 
     def reset_eq(self):
         self.eq_low_slider.setValue(100)
@@ -1275,8 +1517,144 @@ class MainWindow(QMainWindow):
         self.eq_high_slider.setValue(100)
         self.change_eq()
 
+    def current_audio_state(self):
+        return {
+            "channel": self.channel_combo.currentIndex(),
+            "low": self.eq_low_slider.value(),
+            "mid": self.eq_mid_slider.value(),
+            "high": self.eq_high_slider.value()
+        }
+
+    def match_audio_preset_index(self):
+        state = self.current_audio_state()
+
+        for index, preset in enumerate(self.audio_presets):
+            if (
+                preset["channel"] == state["channel"] and
+                preset["low"] == state["low"] and
+                preset["mid"] == state["mid"] and
+                preset["high"] == state["high"]
+            ):
+                return index + 1
+
+        return 0
+
+    def rebuild_preset_combo(self):
+        self.preset_combo.blockSignals(True)
+        self.preset_combo.clear()
+        self.preset_combo.addItem("カスタム")
+
+        for preset in self.audio_presets:
+            self.preset_combo.addItem(preset["name"], preset)
+
+        if self.audio_presets:
+            self.preset_combo.insertSeparator(self.preset_combo.count())
+        self.preset_combo.addItem("現在の設定をプリセット保存...", "__save__")
+        self.preset_combo.addItem("プリセットの管理...", "__manage__")
+        self.preset_combo.blockSignals(False)
+
+    def sync_preset_combo(self):
+        if not hasattr(self, "channel_combo"):
+            return
+
+        index = self.match_audio_preset_index()
+
+        if self.preset_combo.currentIndex() == index:
+            return
+
+        self.preset_combo.blockSignals(True)
+        self.preset_combo.setCurrentIndex(index)
+        self.preset_combo.blockSignals(False)
+
+    def change_audio_preset(self, index):
+        data = self.preset_combo.itemData(index)
+
+        if data is None:
+            return
+
+        if data == "__save__":
+            self.save_current_as_preset()
+            return
+
+        if data == "__manage__":
+            self.manage_presets()
+            return
+
+        if isinstance(data, dict):
+            self.apply_audio_preset(data)
+
+    def apply_audio_preset(self, preset):
+        self.channel_combo.setCurrentIndex(preset["channel"])
+
+        self.eq_low_slider.blockSignals(True)
+        self.eq_mid_slider.blockSignals(True)
+        self.eq_high_slider.blockSignals(True)
+        self.eq_low_slider.setValue(preset["low"])
+        self.eq_mid_slider.setValue(preset["mid"])
+        self.eq_high_slider.setValue(preset["high"])
+        self.eq_low_slider.blockSignals(False)
+        self.eq_mid_slider.blockSignals(False)
+        self.eq_high_slider.blockSignals(False)
+
+        self.change_eq()
+
+    def save_current_as_preset(self):
+        state = self.current_audio_state()
+
+        default_name = f"プリセット{len(self.audio_presets) + 1}"
+        name, ok = QInputDialog.getText(
+            self,
+            "プリセット保存",
+            "プリセット名:",
+            text=default_name
+        )
+
+        name = name.strip() if ok else ""
+
+        if not name:
+            self.sync_preset_combo()
+            return
+
+        preset = {"name": name, **state}
+        self.audio_presets.append(normalize_audio_preset(preset))
+        self.save_audio_presets()
+        self.rebuild_preset_combo()
+        self.select_preset_by_name(name)
+
+    def manage_presets(self):
+        dialog = AudioPresetDialog(
+            self,
+            self.audio_presets
+        )
+
+        if dialog.exec() != QDialog.Accepted:
+            self.sync_preset_combo()
+            return
+
+        self.audio_presets = [
+            normalize_audio_preset(p)
+            for p in dialog.presets
+        ]
+        self.save_audio_presets()
+        self.rebuild_preset_combo()
+        self.sync_preset_combo()
+
+    def select_preset_by_name(self, name):
+        for index in range(1, self.preset_combo.count()):
+            if self.preset_combo.itemText(index) == name:
+                self.preset_combo.blockSignals(True)
+                self.preset_combo.setCurrentIndex(index)
+                self.preset_combo.blockSignals(False)
+                return
+
+    def save_audio_presets(self):
+        save_value(
+            AUDIO_PRESETS_KEY,
+            json.dumps(self.audio_presets, ensure_ascii=False)
+        )
+
     def update_spectrum(self):
-        if self.audio.y_mono is None:
+        if getattr(self.audio, "y_mono", None) is None:
             return
         # Show progress or just block briefly
         # Since analyze is fast enough, we just run it directly. If it takes too long, 
