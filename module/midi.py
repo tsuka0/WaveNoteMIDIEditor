@@ -1561,6 +1561,46 @@ class MidiData:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False)
 
+    @staticmethod
+    def _svp_select_project(text):
+        """NUL区切りで複数JSONが連結されていても対応する。
+
+        Synthesizer V Studio 2 は v1/v2 のデータを同一ファイルに
+        保存することがあるため、version が最も大きいものを採用する。
+        """
+        best = None
+        best_version = None
+
+        for chunk in text.split("\x00"):
+            chunk = chunk.strip().lstrip("\ufeff")
+
+            if not chunk:
+                continue
+
+            try:
+                doc = json.loads(chunk)
+            except json.JSONDecodeError:
+                continue
+
+            if not isinstance(doc, dict):
+                continue
+
+            try:
+                version_num = float(doc.get("version"))
+            except (TypeError, ValueError):
+                version_num = float("-inf")
+
+            if best is None or version_num > best_version:
+                best = doc
+                best_version = version_num
+
+        if best is None:
+            raise ValueError(
+                "有効なプロジェクトデータ(.svp JSON)が見つかりません"
+            )
+
+        return best
+
     def load_svp(self, path):
         """Synthesizer V Studio (.svp) を読み込む。
 
@@ -1568,6 +1608,8 @@ class MidiData:
         tracks[].mainGroup / onset・pitch キー) を読む。
         library 参照 (tracks[].groups) や旧来の別表記にも対応し、
         歌詞(lyrics)はノーツごとに復元される。
+        Synthesizer V Studio 1 / 2 のどちらで保存されたファイルでも
+        読み込める (gzip圧縮 / 先頭BOM / NUL区切りの複数JSONに対応)。
         """
         with open(path, "rb") as f:
             raw = f.read()
@@ -1575,7 +1617,9 @@ class MidiData:
         if raw[:2] == b"\x1f\x8b":
             raw = gzip.decompress(raw)
 
-        data = json.loads(raw.decode("utf-8", errors="replace"))
+        data = self._svp_select_project(
+            raw.decode("utf-8", errors="replace")
+        )
 
         def find_list(*keys):
             cur = data
