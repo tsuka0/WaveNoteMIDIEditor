@@ -1,7 +1,15 @@
 from dataclasses import dataclass, field
 import copy
 import bisect
+import gzip
+import json
+import math
+import uuid as uuidlib
 import mido
+
+# Synthesizer V Studio の時間単位 blick。
+# 1四分音符 = 705,600,000 blick (公式スクリプトAPIの SV.QUARTER 相当)
+BLICKS_PER_QUARTER = 705600000
 
 @dataclass
 class Note:
@@ -10,6 +18,7 @@ class Note:
     pitch: int
     velocity: int = 100
     channel: int = 0
+    lyric: str = ""
 
     def clone(self):
         return copy.copy(self)
@@ -64,7 +73,8 @@ class MidiData:
                             note.duration,
                             note.pitch,
                             note.velocity,
-                            getattr(note, 'channel', 0)
+                            getattr(note, 'channel', 0),
+                            getattr(note, 'lyric', "")
                         )
                         for note in track.notes
                     ],
@@ -78,6 +88,7 @@ class MidiData:
             ],
             "tempos": self.tempos.copy(),
             "time_signatures": self.time_signatures.copy(),
+            "beat_phase": self.beat_phase,
             "extra_state": getattr(self, "extra_state", {}).copy()
         }
 
@@ -92,7 +103,8 @@ class MidiData:
                         note.duration,
                         note.pitch,
                         note.velocity,
-                        getattr(note, 'channel', 0)
+                        getattr(note, 'channel', 0),
+                        getattr(note, 'lyric', "")
                     )
                     for note in track.notes
                 ],
@@ -117,6 +129,10 @@ class MidiData:
             (t, n, d)
             for t, n, d in snap["time_signatures"]
         ]
+
+        self.beat_phase = float(
+            snap.get("beat_phase", 0.0)
+        )
 
         self.bpm = self.tempos[0][1]
 
@@ -376,7 +392,8 @@ class MidiData:
                         ups[i] - note.start,
                         note.pitch,
                         note.velocity,
-                        getattr(note, 'channel', 0)
+                        getattr(note, 'channel', 0),
+                        getattr(note, 'lyric', "")
                     )
                 )
             else:
@@ -544,6 +561,65 @@ class MidiData:
 
     def set_beat_phase(self, beats):
         self.beat_phase = float(beats)
+
+    def apply_tempo_fit(self, start_time, bpm, phi_time):
+        """タップ計測結果をテンポマップへ反映する。
+
+        start_time: 新テンポを追加する位置(再生開始位置・秒)。
+        bpm: 推定BPM。
+        phi_time: 拍番号0に相当するオーディオ時刻(秒)。
+        start_time 以降のテンポマーカーを計測結果で置き換える。
+        位相は追加位置自身を基準にし、その位置が小節頭「1」なら
+        新グリッドでも小節頭「1」の真上に乗るよう補正する
+        (タップ位相ではなく譜面上の位置を優先する)。
+        既存ノーツは旧グリッド上の拍位置を保ったまま新グリッドへ
+        再配置される。
+        """
+        bpm = float(bpm)
+        t_new = max(0.0, float(start_time))
+        spb = 60.0 / max(1e-6, bpm)
+
+        self._ensure_caches()
+
+        # 追加位置の現在の拍値を、その位置の拍子の小節頭に揃える。
+        # ほぼ小節頭で開始されていれば小節頭「1」が動かず、
+        # そこを基準に新BPMのグリッドが刻まれる。
+        # 小節途中からの開始の場合は近傍の整数拍に揃える。
+        base_beat = self.time_to_beat(t_new)
+
+        num, den = self.time_sig_at(t_new)
+        bar_beats = self.bar_length_beats(num, den)
+
+        bar_target = (
+            math.floor(base_beat / bar_beats + 0.5) *
+            bar_beats
+        )
+
+        if abs(bar_target - base_beat) <= max(0.5, bar_beats * 0.25):
+            target = bar_target
+        else:
+            target = math.floor(base_beat + 0.5)
+
+        delta = target - base_beat
+
+        def apply():
+            out = [
+                (t, b)
+                for t, b in self.tempos
+                if t < t_new - 1e-6
+            ]
+
+            if not out:
+                out = [(0.0, bpm)]
+            else:
+                out.append((t_new, bpm))
+
+            self.tempos = out
+            self.bpm = self.tempos[0][1]
+            self.beat_phase += delta
+            self._refresh_caches()
+
+        self._apply_tempo_map_change(apply)
 
     def add_tempo(self, time, bpm):
         def apply():
@@ -958,7 +1034,8 @@ class MidiData:
                 note.duration,
                 max(0, min(127, note.pitch + pitch_offset)),
                 note.velocity,
-                getattr(note, 'channel', track.channel)
+                getattr(note, 'channel', track.channel),
+                getattr(note, 'lyric', "")
             )
             new_note._original_track = t_idx
             
@@ -1256,6 +1333,482 @@ class MidiData:
                     )
 
         midi.save(path)
+
+    # ------------------------------------------------------------------
+    # Synthesizer V Studio (.svp) 入出力
+    # ------------------------------------------------------------------
+    def _svp_tempo_marks(self):
+        """書き出し用にテンポマークを整理する (時刻秒, BPM)。"""
+        marks = []
+
+        for t_sec, bpm in self.tempos:
+            t = max(0.0, float(t_sec))
+
+            if marks and abs(marks[-1][0] - t) < 1e-9:
+                marks[-1] = (t, float(bpm))
+            else:
+                marks.append((t, float(bpm)))
+
+        marks.sort(key=lambda x: x[0])
+
+        if not marks or marks[0][0] > 1e-9:
+            bpm0 = marks[0][1] if marks else 120.0
+            marks.insert(0, (0.0, bpm0))
+
+        return marks
+
+    def _svp_build_converter(self, marks):
+        """秒 <-> blick 変換関数をテンポマップから作る。"""
+        positions = [m[0] for m in marks]
+        cum_blick = [0.0]
+
+        for i in range(len(marks) - 1):
+            dt = marks[i + 1][0] - marks[i][0]
+            cum_blick.append(
+                cum_blick[-1] +
+                dt * marks[i][1] / 60.0 *
+                BLICKS_PER_QUARTER
+            )
+
+        def sec2blink(sec):
+            i = bisect.bisect_right(positions, sec) - 1
+
+            if i < 0:
+                i = 0
+                sec = positions[0]
+
+            return (
+                cum_blick[i] +
+                (sec - positions[i]) *
+                marks[i][1] / 60.0 *
+                BLICKS_PER_QUARTER
+            )
+
+        def blick2sec(blick):
+            i = bisect.bisect_right(cum_blick, blick) - 1
+
+            if i < 0:
+                i = 0
+                blick = cum_blick[0]
+
+            return (
+                positions[i] +
+                (blick - cum_blick[i]) *
+                60.0 / marks[i][1]
+            )
+
+        return sec2blink, blick2sec
+
+    def save_svp(self, path):
+        """Synthesizer V Studio (.svp) 形式で書き出す。
+
+        実際の .svp ディスク形式 (version数値 / time.tempo・time.meter /
+        tracks[].mainGroup 埋め込み / onset・pitch キー) で出力する。
+        時間単位は blick (1四分音符 = 705,600,000 blick)。
+        ノーツの歌詞は lyrics フィールドに書き込まれる。
+        """
+        self._ensure_caches()
+
+        marks = self._svp_tempo_marks()
+        sec2blink, _ = self._svp_build_converter(marks)
+
+        tempo_out = [
+            {
+                "position": int(round(sec2blink(t))),
+                "bpm": float(bpm),
+            }
+            for t, bpm in marks
+        ]
+
+        # 拍子は「小節番号(index)」指定なので、時刻から小節番号へ変換する
+        sig_entries = sorted(
+            (
+                (max(0.0, float(t)), int(num), int(den))
+                for t, num, den in self.time_signatures
+            ),
+            key=lambda x: x[0],
+        )
+
+        if not sig_entries or sig_entries[0][0] > 1e-9:
+            sig_entries.insert(0, (0.0, 4, 4))
+
+        meter_out = []
+        bar_index = 0
+        pos_beat = 0.0
+        prev_bar_beats = None
+
+        for i, (t, num, den) in enumerate(sig_entries):
+            if i == 0:
+                cur_index = 0
+            else:
+                target_beat = sec2blink(t) / BLICKS_PER_QUARTER
+                delta_beats = target_beat - pos_beat
+
+                if delta_beats < prev_bar_beats * 0.5:
+                    continue
+
+                delta_bars = max(
+                    1,
+                    int(math.floor(delta_beats / prev_bar_beats + 0.5)),
+                )
+                bar_index += delta_bars
+                pos_beat += delta_bars * prev_bar_beats
+                cur_index = bar_index
+
+            meter_out.append(
+                {
+                    "index": cur_index,
+                    "numerator": num,
+                    "denominator": den,
+                }
+            )
+
+            prev_bar_beats = num * 4.0 / den
+
+        if not meter_out:
+            meter_out = [{"index": 0, "numerator": 4, "denominator": 4}]
+
+        default_params = {
+            name: {"mode": "cubic", "points": []}
+            for name in (
+                "pitchDelta",
+                "vibratoEnv",
+                "loudness",
+                "tension",
+                "breathiness",
+                "voicing",
+                "gender",
+            )
+        }
+
+        tracks_out = []
+
+        for index, track in enumerate(self.tracks):
+            group_id = str(uuidlib.uuid4())
+
+            notes_out = []
+            for note in sorted(track.notes, key=lambda n: n.start):
+                t_blick = int(round(sec2blink(note.start)))
+                d_blick = max(
+                    1,
+                    int(round(sec2blink(note.start + note.duration))) -
+                    t_blick,
+                )
+
+                notes_out.append(
+                    {
+                        "onset": max(0, t_blick),
+                        "duration": d_blick,
+                        "lyrics": getattr(note, "lyric", ""),
+                        "phonemes": "",
+                        "pitch": int(max(0, min(127, int(note.pitch)))),
+                        "attributes": {},
+                    }
+                )
+
+            tracks_out.append(
+                {
+                    "name": track.name or f"Track {index + 1}",
+                    "dispColor": "ff7db235",
+                    "dispOrder": index,
+                    "renderEnabled": True,
+                    "mixer": {
+                        "gainDecibel": 0.0,
+                        "pan": 0.0,
+                        "mute": False,
+                        "solo": False,
+                        "display": True,
+                    },
+                    "mainGroup": {
+                        "name": "main",
+                        "uuid": group_id,
+                        "parameters": dict(default_params),
+                        "notes": notes_out,
+                    },
+                    "mainRef": {
+                        "groupID": group_id,
+                        "blickOffset": 0,
+                        "pitchOffset": 0,
+                        "isInstrumental": False,
+                        "database": {"name": "", "language": "", "phoneset": ""},
+                        "audio": {"filename": "", "duration": 0.0},
+                        "dictionary": "",
+                        "voice": {},
+                    },
+                    "groups": [],
+                }
+            )
+
+        data = {
+            "version": 113,
+            "time": {
+                "meter": meter_out,
+                "tempo": tempo_out,
+            },
+            "library": [],
+            "tracks": tracks_out,
+            "renderConfig": {
+                "destination": "./",
+                "filename": "untitled",
+                "numChannels": 1,
+                "aspirationFormat": "noAspiration",
+                "bitDepth": 16,
+                "sampleRate": 44100,
+                "exportMixDown": True,
+            },
+        }
+
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+
+    def load_svp(self, path):
+        """Synthesizer V Studio (.svp) を読み込む。
+
+        実際のディスク形式 (time.tempo / time.meter /
+        tracks[].mainGroup / onset・pitch キー) を読む。
+        library 参照 (tracks[].groups) や旧来の別表記にも対応し、
+        歌詞(lyrics)はノーツごとに復元される。
+        """
+        with open(path, "rb") as f:
+            raw = f.read()
+
+        if raw[:2] == b"\x1f\x8b":
+            raw = gzip.decompress(raw)
+
+        data = json.loads(raw.decode("utf-8", errors="replace"))
+
+        def find_list(*keys):
+            cur = data
+
+            for key in keys:
+                if isinstance(cur, dict) and key in cur:
+                    cur = cur[key]
+                else:
+                    return None
+
+            return cur if isinstance(cur, list) else None
+
+        tempo_raw = (
+            find_list("time", "tempo") or
+            find_list("tempos") or
+            find_list("timeAxis", "tempo") or
+            []
+        )
+
+        ts_raw = (
+            find_list("time", "meter") or
+            find_list("timeSignatures") or
+            find_list("timeAxis", "measure") or
+            []
+        )
+
+        tempo_marks = []
+
+        for mark in tempo_raw:
+            try:
+                pos = float(mark.get("position", 0))
+                bpm = float(
+                    mark.get("bpm", mark.get("beatPerMinute", 120))
+                )
+            except (TypeError, ValueError, AttributeError):
+                continue
+
+            if bpm <= 0:
+                continue
+
+            tempo_marks.append((pos, bpm))
+
+        if not tempo_marks:
+            tempo_marks = [(0.0, 120.0)]
+
+        tempo_marks.sort(key=lambda x: x[0])
+
+        if tempo_marks[0][0] > 0:
+            tempo_marks.insert(0, (0.0, tempo_marks[0][1]))
+
+        positions = [m[0] for m in tempo_marks]
+        cum_sec = [0.0]
+
+        for i in range(len(tempo_marks) - 1):
+            db = tempo_marks[i + 1][0] - tempo_marks[i][0]
+            cum_sec.append(
+                cum_sec[-1] +
+                db / BLICKS_PER_QUARTER *
+                60.0 / tempo_marks[i][1]
+            )
+
+        def blick2sec(blick):
+            i = bisect.bisect_right(positions, blick) - 1
+
+            if i < 0:
+                i = 0
+                blick = positions[0]
+
+            return (
+                cum_sec[i] +
+                (blick - positions[i]) /
+                BLICKS_PER_QUARTER *
+                60.0 / tempo_marks[i][1]
+            )
+
+        self.tempos = [
+            (round(blick2sec(pos), 9), bpm)
+            for pos, bpm in tempo_marks
+        ]
+        self.bpm = self.tempos[0][1]
+
+        # 拍子: position(blick) か index(小節番号) のどちらかで与えられる
+        time_signatures = []
+
+        if any(isinstance(s, dict) and "position" in s for s in ts_raw):
+            for sig in ts_raw:
+                try:
+                    pos = float(sig.get("position", 0))
+                    num = int(sig.get("numerator", 4))
+                    den = int(sig.get("denominator", 4))
+                except (TypeError, ValueError, AttributeError):
+                    continue
+
+                time_signatures.append((blick2sec(pos), num, den))
+        else:
+            # index は小節番号。テンポマップに沿って時刻へ変換する
+            cur_bar = 0
+            cur_pos_beat = 0.0
+            cur_bar_beats = None
+
+            for sig in ts_raw:
+                try:
+                    idx = int(sig.get("index", 0))
+                    num = int(sig.get("numerator", 4))
+                    den = int(sig.get("denominator", 4))
+                except (TypeError, ValueError, AttributeError):
+                    continue
+
+                if idx > cur_bar and cur_bar_beats is not None:
+                    cur_pos_beat += (idx - cur_bar) * cur_bar_beats
+                    cur_bar = idx
+
+                time_signatures.append((blick2sec(cur_pos_beat * BLICKS_PER_QUARTER), num, den))
+
+                cur_bar_beats = num * 4.0 / den
+
+        self.time_signatures = time_signatures or [(0.0, 4, 4)]
+
+        library = {}
+
+        for key in ("library", "noteGroups"):
+            for group in (data.get(key) or []):
+                if isinstance(group, dict) and group.get("uuid"):
+                    library.setdefault(group["uuid"], group)
+
+        new_tracks = []
+
+        for track_data in (data.get("tracks") or []):
+            if not isinstance(track_data, dict):
+                continue
+
+            main_group = track_data.get("mainGroup")
+
+            refs = []
+
+            main_ref = track_data.get("mainRef")
+
+            if isinstance(main_ref, dict):
+                refs.append(main_ref)
+
+            for ref in (track_data.get("groups") or []):
+                if isinstance(ref, dict):
+                    refs.append(ref)
+
+            notes = []
+
+            for ref in refs:
+                group_id = ref.get("groupID")
+                group = None
+
+                if (
+                    isinstance(main_group, dict) and
+                    main_group.get("uuid") == group_id
+                ):
+                    group = main_group
+
+                if group is None:
+                    group = library.get(group_id)
+
+                if group is None:
+                    continue
+
+                offset = float(
+                    ref.get("blickOffset", ref.get("timeOffset", 0)) or 0
+                )
+                pitch_offset = float(ref.get("pitchOffset", 0) or 0)
+
+                for note_data in (group.get("notes") or []):
+                    try:
+                        onset = offset + float(
+                            note_data.get("onset", note_data.get("t", 0))
+                        )
+                        duration = float(note_data.get("duration", 0))
+                        number = note_data.get(
+                            "pitch",
+                            note_data.get("number"),
+                        )
+
+                        if number is None or duration <= 0 or onset < 0:
+                            continue
+
+                        pitch = int(round(float(number) + pitch_offset))
+                    except (TypeError, ValueError):
+                        continue
+
+                    pitch = max(0, min(127, pitch))
+
+                    start = blick2sec(onset)
+                    end = blick2sec(onset + duration)
+                    duration_sec = max(1e-3, end - start)
+
+                    lyric = str(note_data.get("lyrics", "") or "")
+
+                    notes.append(
+                        Note(
+                            start,
+                            duration_sec,
+                            pitch,
+                            100,
+                            0,
+                            lyric,
+                        )
+                    )
+
+            if notes:
+                notes.sort(key=lambda x: (x.start, x.pitch))
+
+                name = (
+                    track_data.get("name") or
+                    f"トラック {len(new_tracks) + 1}"
+                )
+
+                new_tracks.append(
+                    Track(
+                        name=name,
+                        notes=notes,
+                        channel=0,
+                    )
+                )
+
+        if not new_tracks:
+            new_tracks = [Track()]
+
+        self.tracks = new_tracks
+        self.filter_track = 0
+        self.beat_phase = 0.0
+        self.has_file = True
+
+        self.sort()
+        self.extra_state = {}
+        self._refresh_caches()
+        self._bump()
+
 
     def load(self, path):
         try:

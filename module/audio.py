@@ -64,6 +64,7 @@ class AudioData:
         self._render_env = None
 
         self.volume = 0.5
+        self.audio_muted = False
         self.offset = 0.0
         self.preview_pitch = None
         self.preview_until = 0.0
@@ -522,7 +523,9 @@ class AudioData:
                     y_mid = block - y_low - y_high
                     block = (y_low * self.eq_low) + (y_mid * self.eq_mid) + (y_high * self.eq_high)
 
-                block *= self.volume
+                # 音声ミュート時はオーディオ波形のみを無音にする
+                # (MIDI音源は block への合成前なので影響を受けない)
+                block *= 0.0 if self.audio_muted else self.volume
                 block = block.astype(np.float32)
 
                 end_time = current_time + block_size / sample_rate

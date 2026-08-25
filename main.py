@@ -69,7 +69,9 @@ DEFAULT_SHORTCUTS = {
     "action_redo": "Ctrl+Y",
     "action_play": "Space",
     "action_split": "S",
-    "action_select_all": "Ctrl+A"
+    "action_select_all": "Ctrl+A",
+    "action_tap_tempo": "Shift+Space",
+    "action_lyric_mode": "L"
 }
 
 def get_shortcut(key):
@@ -77,6 +79,15 @@ def get_shortcut(key):
     if val:
         return str(val)
     return DEFAULT_SHORTCUTS.get(key, "")
+
+def toggle_button_style(checked_color):
+    """トグルボタンのスタイル。ONのとき分かりやすいように
+    指定色で塗りつぶす。"""
+    return (
+        "QPushButton { margin-left: 8px; padding: 2px 10px; }"
+        f"QPushButton:checked {{ background-color: {checked_color}; "
+        f"border-color: {checked_color}; color: white; font-weight: bold; }}"
+    )
 
 class ShortcutDialog(QDialog):
     def __init__(self, parent=None):
@@ -95,7 +106,9 @@ class ShortcutDialog(QDialog):
             "action_redo": "やり直し",
             "action_play": "再生 / 停止",
             "action_split": "ノーツを分割",
-            "action_select_all": "すべて選択"
+            "action_select_all": "すべて選択",
+            "action_tap_tempo": "テンポを手動計測(タップ)",
+            "action_lyric_mode": "歌詞入力モード"
         }
         
         for key, label in labels.items():
@@ -296,6 +309,9 @@ class MainWindow(QMainWindow):
         self.editor.track_switch_requested.connect(
             self.switch_track_by_delta
         )
+        self.editor.tap_tempo_applied.connect(
+            self.apply_tapped_tempo
+        )
 
         saved_return = load_value(
             "return_to_start_on_stop",
@@ -377,6 +393,7 @@ class MainWindow(QMainWindow):
         self._pending_tempo_analysis = None
         self._project_path = None
         self._last_midi_path = None
+        self._last_midi_is_svp = False
         self._saved_project_state = None
 
         self._mark_project_saved()
@@ -457,7 +474,7 @@ class MainWindow(QMainWindow):
         self.status_notes_label.setMinimumWidth(90)
         self.status_notes_label.setToolTip("ノーツ数(トラック選択中はそのトラックの数)")
 
-        self.status_bpm_label = QLabel("BPM --.-")
+        self.status_bpm_label = QLabel("BPM ---")
         self.status_bpm_label.setMinimumWidth(90)
         self.status_bpm_label.setToolTip("再生位置のテンポ")
 
@@ -510,12 +527,10 @@ class MainWindow(QMainWindow):
             self.editor.play_position
         )
 
-        bpm_text = f"BPM {bpm:.1f}"
+        bpm_text = f"BPM {bpm:.0f}"
 
         if self.status_bpm_label.text() != bpm_text:
             self.status_bpm_label.setText(bpm_text)
-
-
 
     def dropEvent(self, event):
         urls = event.mimeData().urls()
@@ -554,7 +569,7 @@ class MainWindow(QMainWindow):
         ext = Path(path).suffix.lower()
         if ext == ".wnp":
             self.load_project(path)
-        elif ext in (".mid", ".midi"):
+        elif ext in (".mid", ".midi", ".svp"):
             self.load_midi_file(path)
         elif ext in (".wav", ".mp3", ".flac", ".ogg", ".m4a"):
             self.load_audio_file(path)
@@ -615,7 +630,7 @@ class MainWindow(QMainWindow):
         save_project_action.setShortcut(QKeySequence.StandardKey.Save)
         save_project_action.triggered.connect(self.save_project)
 
-        open_midi_action = QAction("MIDIを開く", self)
+        open_midi_action = QAction("MIDI / SVPを開く", self)
         open_midi_action.triggered.connect(self.open_midi)
 
         open_audio_action = QAction("オーディオを開く", self)
@@ -719,6 +734,21 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(select_all_action)
         self.actions["action_select_all"] = select_all_action
 
+        lyric_mode_action = QAction(
+            "歌詞入力モード",
+            self
+        )
+        lyric_mode_action.setCheckable(True)
+        lyric_mode_action.setToolTip(
+            "ノーツをクリックして歌詞を入力します。"
+            "右ドラッグやCtrl+Aで選択したノーツには時系列順に連続入力できます(L)"
+        )
+        lyric_mode_action.triggered.connect(
+            self.toggle_lyric_mode
+        )
+        edit_menu.addAction(lyric_mode_action)
+        self.actions["action_lyric_mode"] = lyric_mode_action
+
         stop_action = QAction(
             "停止",
             self
@@ -729,6 +759,22 @@ class MainWindow(QMainWindow):
         playback_menu.addAction(
             stop_action
         )
+
+        tap_tempo_action = QAction(
+            "テンポを手動計測(タップ)",
+            self
+        )
+        tap_tempo_action.setToolTip(
+            "音声の拍に合わせて Shift+Space を連打してテンポを計測します"
+        )
+        tap_tempo_action.triggered.connect(
+            self.trigger_tap_tempo
+        )
+        playback_menu.addAction(
+            tap_tempo_action
+        )
+
+        self.actions["action_tap_tempo"] = tap_tempo_action
 
         settings_menu = self.menuBar().addMenu(
             "設定"
@@ -875,44 +921,46 @@ class MainWindow(QMainWindow):
             self.return_to_start_checkbox
         )
 
-        self.mute_midi_checkbox = QCheckBox(
+        self.mute_midi_button = QPushButton(
             "MIDIをミュート"
         )
-        self.mute_midi_checkbox.setStyleSheet(
-            "QCheckBox { margin-left: 8px; }"
+        self.mute_midi_button.setCheckable(True)
+        self.mute_midi_button.setStyleSheet(
+            toggle_button_style("#c0392b")
         )
-        self.mute_midi_checkbox.setToolTip(
+        self.mute_midi_button.setToolTip(
             "再生時にMIDI音を鳴らさず、波形(オーディオ)のみ再生します"
         )
-        self.mute_midi_checkbox.setChecked(
+        self.mute_midi_button.setChecked(
             self.audio.midi_muted
         )
-        self.mute_midi_checkbox.toggled.connect(
+        self.mute_midi_button.toggled.connect(
             self.change_mute_midi
         )
 
         toolbar.addWidget(
-            self.mute_midi_checkbox
+            self.mute_midi_button
         )
 
-        self.play_all_tracks_checkbox = QCheckBox(
+        self.play_all_tracks_button = QPushButton(
             "MIDI全体を再生"
         )
-        self.play_all_tracks_checkbox.setStyleSheet(
-            "QCheckBox { margin-left: 8px; }"
+        self.play_all_tracks_button.setCheckable(True)
+        self.play_all_tracks_button.setStyleSheet(
+            toggle_button_style("#2e7d32")
         )
-        self.play_all_tracks_checkbox.setToolTip(
+        self.play_all_tracks_button.setToolTip(
             "単一トラック選択中でも、全トラックのMIDIを鳴らして再生します"
         )
-        self.play_all_tracks_checkbox.setChecked(
+        self.play_all_tracks_button.setChecked(
             self.midi.play_all_tracks
         )
-        self.play_all_tracks_checkbox.toggled.connect(
+        self.play_all_tracks_button.toggled.connect(
             self.change_play_from_start
         )
 
         toolbar.addWidget(
-            self.play_all_tracks_checkbox
+            self.play_all_tracks_button
         )
 
         # --- Audio DSP Toolbar (New Row) ---
@@ -988,6 +1036,22 @@ class MainWindow(QMainWindow):
         self.offset_box.setSuffix(" s")
         self.offset_box.valueChanged.connect(self.change_offset)
         audio_toolbar.addWidget(self.offset_box)
+
+        # Audio Mute
+        self.mute_audio_button = QPushButton("音声ミュート")
+        self.mute_audio_button.setCheckable(True)
+        self.mute_audio_button.setStyleSheet(
+            toggle_button_style("#c0392b")
+        )
+        self.mute_audio_button.setToolTip(
+            "音声ファイルの再生をミュートします(MIDI音源は鳴り続けます)"
+        )
+        self.mute_audio_button.setChecked(
+            str(load_value("mute_audio", "0")).lower() in ("1", "true", "yes", "on")
+        )
+        self.audio.audio_muted = self.mute_audio_button.isChecked()
+        self.mute_audio_button.toggled.connect(self.change_mute_audio)
+        audio_toolbar.addWidget(self.mute_audio_button)
 
         # Spectrum Threshold
         threshold_label = QLabel(
@@ -1157,6 +1221,13 @@ class MainWindow(QMainWindow):
             "1" if checked else "0"
         )
 
+    def change_mute_audio(self, checked):
+        self.audio.audio_muted = checked
+        save_value(
+            "mute_audio",
+            "1" if checked else "0"
+        )
+
     def change_play_from_start(self, checked):
         self.midi.play_all_tracks = checked
         self.audio.invalidate_midi_cache()
@@ -1238,6 +1309,7 @@ class MainWindow(QMainWindow):
             "midi_filter_track": self.midi.filter_track,
             "midi_tempos": self.midi.tempos,
             "midi_timesigs": self.midi.time_signatures,
+            "midi_beat_phase": getattr(self.midi, "beat_phase", 0.0),
             "audio_offset": self.audio.offset,
             "audio_volume": self.audio.volume,
             "audio_file": self.audio.file_path,
@@ -1255,6 +1327,7 @@ class MainWindow(QMainWindow):
                         "pitch": note.pitch,
                         "velocity": note.velocity,
                         "channel": getattr(note, "channel", track.channel),
+                        "lyric": getattr(note, "lyric", ""),
                     }
                     for note in track.notes
                 ],
@@ -1279,8 +1352,9 @@ class MainWindow(QMainWindow):
                 len(track.pedals)
                 for track in self.midi.tracks
             ),
-            len(self.midi.tempos),
+            tuple(self.midi.tempos),
             len(self.midi.time_signatures),
+            float(getattr(self.midi, "beat_phase", 0.0)),
             self.audio.offset,
             self.audio.volume,
             getattr(self.audio, "a4_freq", 440.0),
@@ -1421,6 +1495,13 @@ class MainWindow(QMainWindow):
         self.midi.time_signatures = [
             (float(ts[0]), int(ts[1]), int(ts[2])) for ts in raw_timesigs
         ] if raw_timesigs else [(0.0, 4, 4)]
+
+        # グリッド原点(タップ計測などで設定される)を復元しないと
+        # 開き直した時にMIDIに対してグリッドがずれる
+        self.midi.beat_phase = float(
+            project.get("midi_beat_phase", 0.0)
+        )
+
         self.midi.has_file = bool(project.get("midi_tracks"))
 
         # トラックの再構築
@@ -1434,7 +1515,8 @@ class MainWindow(QMainWindow):
                         duration=note_data["duration"],
                         pitch=note_data["pitch"],
                         velocity=note_data.get("velocity", 100),
-                        channel=note_data.get("channel", track.channel)
+                        channel=note_data.get("channel", track.channel),
+                        lyric=note_data.get("lyric", "")
                     )
                 )
             for pedal_data in track_data.get("pedals", []):
@@ -1604,6 +1686,73 @@ class MainWindow(QMainWindow):
         self.editor.placement_beats = beats
 
         self.editor.update()
+
+    def trigger_tap_tempo(self):
+        if (
+            not self.editor.tap_mode and
+            self.audio.y is None
+        ):
+            QMessageBox.information(
+                self,
+                "テンポを手動計測",
+                "音声ファイルが読み込まれていません。\n"
+                "先にオーディオファイルを開いてください。"
+            )
+            return
+
+        self.editor.tap_tempo_trigger()
+
+    def toggle_lyric_mode(self):
+        has_notes = any(
+            track.notes
+            for track in self.midi.tracks
+        )
+
+        if not self.editor.lyric_mode and not has_notes:
+            QMessageBox.information(
+                self,
+                "歌詞入力モード",
+                "ノーツがありません。\n"
+                "先にノーツを追加してください。"
+            )
+            action = self.actions.get("action_lyric_mode")
+            if action is not None:
+                action.setChecked(False)
+            return
+
+        enabled = self.editor.toggle_lyric_mode()
+
+        action = self.actions.get("action_lyric_mode")
+        if action is not None and action.isChecked() != enabled:
+            action.setChecked(enabled)
+
+        if enabled:
+            self.statusBar().showMessage(
+                "歌詞入力モード: ノーツをクリックして歌詞を入力"
+                "(選択中のノーツは時系列順に連続入力 / "
+                "右ドラッグで範囲選択 / Escで終了)",
+                8000
+            )
+        else:
+            self.statusBar().showMessage(
+                "歌詞入力モードを終了しました",
+                3000
+            )
+
+    def apply_tapped_tempo(self, bpm, phi_time, start_time):
+        try:
+            self.midi.push_undo()
+            self.midi.apply_tempo_fit(start_time, bpm, phi_time)
+        except Exception:
+            return
+
+        self.editor.bpm = self.midi.bpm
+        self.after_edit()
+        self.statusBar().showMessage(
+            f"計測したテンポを適用しました: {bpm:.2f} BPM "
+            f"(開始位置 {max(0.0, float(start_time)):.2f}s)",
+            5000
+        )
 
     def insert_tempo(self):
         current_tempo = self.midi.tempo_at(self.editor.play_position)
@@ -1835,9 +1984,9 @@ class MainWindow(QMainWindow):
     def open_midi(self):
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "MIDIを開く",
+            "MIDI / SVPを開く",
             load_last_dir(),
-            "MIDI Files (*.mid *.midi)"
+            "MIDI / Synthesizer V Project (*.mid *.midi *.svp);;MIDI Files (*.mid *.midi);;Synthesizer V Project (*.svp)"
         )
 
         if path:
@@ -1849,17 +1998,22 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(
                 self,
                 "エラー",
-                f"MIDIファイルが見つかりません:\n{path}"
+                f"ファイルが見つかりません:\n{path}"
             )
             return
 
         save_last_dir_from_path(path)
 
         try:
-            self.midi.load(
-                path
-            )
+            if Path(path).suffix.lower() == ".svp":
+                self.midi.load_svp(path)
+            else:
+                self.midi.load(path)
+
             self._last_midi_path = path
+            self._last_midi_is_svp = (
+                Path(path).suffix.lower() == ".svp"
+            )
 
             self.midi.clear_history()
 
@@ -1889,8 +2043,12 @@ class MainWindow(QMainWindow):
     def save_midi(self):
         if self._last_midi_path:
             try:
-                self.midi.save(self._last_midi_path)
-                QMessageBox.information(self, "完了", "MIDIファイルを上書き保存しました。")
+                if self._last_midi_is_svp:
+                    self.midi.save_svp(self._last_midi_path)
+                    QMessageBox.information(self, "完了", "SVPファイルを上書き保存しました。")
+                else:
+                    self.midi.save(self._last_midi_path)
+                    QMessageBox.information(self, "完了", "MIDIファイルを上書き保存しました。")
             except Exception as e:
                 QMessageBox.critical(
                     self,
@@ -1905,7 +2063,7 @@ class MainWindow(QMainWindow):
             self,
             "書き出しを保存",
             load_last_dir(),
-            "MIDI Files (*.mid *.midi);;WAV Files (*.wav)"
+            "MIDI Files (*.mid *.midi);;WAV Files (*.wav);;Synthesizer V Project (*.svp)"
         )
 
         if not path:
@@ -1930,11 +2088,23 @@ class MainWindow(QMainWindow):
                 
                 progress.close()
                 QMessageBox.information(self, "完了", "WAVファイルの書き出しが完了しました。")
+            elif (
+                selected_filter == "Synthesizer V Project (*.svp)" or
+                path.lower().endswith(".svp")
+            ):
+                if not path.lower().endswith(".svp"):
+                    path += ".svp"
+
+                self.midi.save_svp(path)
+                self._last_midi_path = path
+                self._last_midi_is_svp = True
+                QMessageBox.information(self, "完了", "SVPファイルの保存が完了しました。")
             else:
                 if not path.lower().endswith((".mid", ".midi")):
                     path += ".mid"
                 self.midi.save(path)
                 self._last_midi_path = path
+                self._last_midi_is_svp = False
                 QMessageBox.information(self, "完了", "MIDIファイルの保存が完了しました。")
                 
         except Exception as e:

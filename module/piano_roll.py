@@ -1,14 +1,17 @@
 import math
+import time
 import bisect
 import numpy as np
-from PySide6.QtWidgets import QWidget, QDialog, QSpinBox, QDoubleSpinBox, QCheckBox, QLabel, QVBoxLayout, QHBoxLayout, QDialogButtonBox, QMenu
-from PySide6.QtCore import Qt, QPointF, QRectF, Signal
+from PySide6.QtWidgets import QWidget, QDialog, QSpinBox, QDoubleSpinBox, QCheckBox, QLabel, QVBoxLayout, QHBoxLayout, QDialogButtonBox, QMenu, QInputDialog
+from PySide6.QtCore import Qt, QPointF, QRectF, Signal, QTimer
 from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont, QKeySequence, QImage, QPixmap
 from .midi import PedalEvent
+from .taptempo import TapTempoEngine, MIN_TAPS_FOR_APPLY
 
 class PianoRoll(QWidget):
     marker_edited = Signal()
     track_switch_requested = Signal(int)
+    tap_tempo_applied = Signal(float, float, float)
 
     def __init__(
         self,
@@ -149,6 +152,25 @@ class PianoRoll(QWidget):
 
         self._previewed_pitch = None
         self._nudge_undo_pushed = False
+
+        # --- 手動テンポ計測(タップテンポ) ---
+        self.tap_mode = False
+        self.tap_engine = TapTempoEngine()
+        self._tap_fit = None
+        self._tap_disp_bpm = 120.0
+        self._tap_disp_phi = 0.0
+        # 今回の再生が開始された位置(計測結果の追加先)
+        self._tap_play_start = None
+
+        # --- 歌詞入力モード ---
+        self.lyric_mode = False
+        self._tap_anim_timer = QTimer(self)
+        self._tap_anim_timer.setTimerType(
+            Qt.TimerType.PreciseTimer
+        )
+        self._tap_anim_timer.timeout.connect(
+            self._tap_tick
+        )
 
         self.setMouseTracking(
             True
@@ -497,22 +519,57 @@ class PianoRoll(QWidget):
         import math
         if grid is None:
             grid = self.note_length
-            
-        beat = self.midi.time_to_beat(
-            max(
-                0.0,
-                value
-            )
+
+        t = max(
+            0.0,
+            value
         )
 
-        if mode == "floor":
-            snapped = math.floor(beat / grid) * grid
-        elif mode == "ceil":
-            # 浮動小数点誤差でわずかに手前になった値が
-            # 次のグリッドに切り上がらないよう許容誤差を持たせる
-            snapped = math.ceil(beat / grid - 1e-6) * grid
+        # マウス座標はピクセル単位で、グリッド線は int() で切り捨てて
+        # 描画されるため、座標が理想のグリッド時刻より半ピクセル以下
+        # 手前になることがある。さらに beat<->time の往復でも浮動小数点
+        # 誤差が生じる。このまま floor/ceil すると、コピペの貼り付け開始
+        # 位置・ノーツ追加・ゲート(右端)変更・範囲選択などがごくまれに
+        # 1グリッド分ずれる原因になるため、半ピクセル分の手前誤差は
+        # 意図した位置とみなして吸収する。
+        bpm = self.midi.tempo_at(t)
+
+        grid_seconds = (
+            grid *
+            (60.0 / bpm)
+            if grid > 0
+            else 0.0
+        )
+
+        if grid_seconds > 0:
+            tolerance = min(
+                0.5 * self.seconds_per_pixel,
+                0.25 * grid_seconds
+            )
+
+            # ピクセル許容幅が極端に小さいズームでも
+            # 浮動小数点誤差は吸収できるように下限を設ける
+            tolerance = max(tolerance, 1e-6)
         else:
-            snapped = round(beat / grid) * grid
+            tolerance = 1e-6
+
+        tol_units = (
+            tolerance *
+            bpm /
+            60.0 /
+            grid
+        )
+
+        beat = self.midi.time_to_beat(t)
+
+        units = beat / grid
+
+        if mode == "floor":
+            snapped = math.floor(units + tol_units) * grid
+        elif mode == "ceil":
+            snapped = math.ceil(units - tol_units) * grid
+        else:
+            snapped = round(units) * grid
 
         return max(
             0.0,
@@ -568,10 +625,24 @@ class PianoRoll(QWidget):
         self._pre_play_scroll = self.scroll_x
         self._is_following_center = False
         self._has_paged = False
+
         if not self.audio.playing:
+            # Spaceで再生を開始した時点の位置を覚えておき、
+            # タップ計測の確定時にこの位置へテンポを追加する。
+            # 再生中のシークで書き換わる _start_position とは
+            # 別に保持する。
+            self._tap_play_start = max(
+                0.0,
+                float(getattr(self.audio, "position", 0.0))
+            )
+
             self.audio.play()
 
     def pause(self):
+        if self.tap_mode:
+            # 停止した時点でタップ計測を確定する
+            self.finish_tap_tempo(True)
+
         self.audio.pause()
 
         self.set_play_position(
@@ -581,6 +652,10 @@ class PianoRoll(QWidget):
         self.update()
 
     def stop(self):
+        if self.tap_mode:
+            # 停止した時点でタップ計測を確定する
+            self.finish_tap_tempo(True)
+
         self.audio.stop()
 
         self.set_play_position(
@@ -597,11 +672,317 @@ class PianoRoll(QWidget):
 
         self.update()
 
+    # ------------------------------------------------------------------
+    # 手動テンポ計測(タップテンポ)
+    # ------------------------------------------------------------------
+    def tap_tempo_trigger(self):
+        """Shift+Space: 再生中のみ計測モードを開始し、
+        起動中ならタップを記録する。停止中は受け付けない。"""
+        if not self.audio.playing:
+            return False
+
+        if not self.tap_mode:
+            if self.audio.y is None:
+                return False
+
+            self.tap_mode = True
+            self._tap_fit = None
+            # 追加位置は play() で記録済み(再生開始時の位置)。
+            # 念のため未記録の場合だけ現在値から補完する。
+            if self._tap_play_start is None:
+                self._tap_play_start = max(
+                    0.0,
+                    float(getattr(self.audio, "_start_position", 0.0))
+                )
+            self._tap_disp_bpm = max(
+                20.0,
+                self.midi.bpm
+            )
+            self.tap_engine.reset()
+            self._tap_anim_timer.start(16)
+
+        self._register_tap()
+        return True
+
+    def _current_tap_position(self, now):
+        """タップ瞬間のオーディオ位置(秒)を取得する。
+
+        内部時計から即時推定し、UIタイマーの遅れを排除する。
+        """
+        audio = self.audio
+
+        estimate = (
+            audio._start_position +
+            max(
+                0.0,
+                now - audio._started_at - audio._latency
+            )
+        )
+
+        return max(
+            0.0,
+            min(audio.max_position(), estimate)
+        )
+
+    def _register_tap(self):
+        now = time.perf_counter()
+        position = self._current_tap_position(now)
+
+        self.tap_engine.split_on_jump(
+            now,
+            position,
+            self.audio.playing
+        )
+
+        if self.tap_engine.add_tap(now, position):
+            self._tap_fit = self.tap_engine.fit()
+
+    def _tap_tick(self):
+        fit = self._tap_fit
+
+        if fit is not None:
+            # 新しい推定へ滑らかに収束させ、タップのたびに
+            # グリッドがリアルタイムに動いて見えるようにする
+            k = 1.0 - math.exp(-0.016 / 0.07)
+            self._tap_disp_bpm += (
+                fit["bpm"] - self._tap_disp_bpm
+            ) * k
+            self._tap_disp_phi += (
+                fit["phi_audio"] - self._tap_disp_phi
+            ) * k
+
+        self.update()
+
+    def finish_tap_tempo(self, commit):
+        if not self.tap_mode:
+            return
+
+        self.tap_mode = False
+        self._tap_anim_timer.stop()
+
+        fit = self._tap_fit
+
+        if (
+            commit and
+            fit is not None and
+            fit["n"] >= MIN_TAPS_FOR_APPLY
+        ):
+            # 内部では小数点以下も正確に計算し、確定時にのみ
+            # 最も近い整数BPMへ丸める。位相は丸えたBPMに対し
+            # 打鍵位置へ最良一致させる。
+            bpm_value = float(math.floor(fit["bpm"] + 0.5))
+            phi = self.tap_engine.fit_phase(bpm_value)
+
+            if phi is None:
+                phi = fit["phi_audio"]
+
+            # 再生開始位置へ計測結果を追加する
+            self.tap_tempo_applied.emit(
+                bpm_value,
+                phi,
+                self._tap_play_start
+                if self._tap_play_start is not None
+                else 0.0
+            )
+
+        self._tap_fit = None
+        self.update()
+
+    # ------------------------------------------------------------------
+    # 歌詞入力モード
+    # ------------------------------------------------------------------
+    def _start_range_selection(self, x, y, lane_top):
+        """右ドラッグによる手動範囲選択を開始する。"""
+        self.selection_mode = True
+        self.selection_rect = None
+
+        if y >= lane_top + self.velocity_lane_height:
+            self.selection_start = (
+                self.snap_time(
+                    self.x_to_time(x),
+                    mode="floor"
+                ),
+                self.min_pitch
+            )
+            self.selection_end = self.selection_start
+            self.selection_in_lane = True
+            self.selection_in_pedal = True
+        else:
+            self.selection_start = (
+                self.snap_time(
+                    self.x_to_time(x),
+                    mode="floor"
+                ),
+                self.y_to_pitch(y)
+            )
+            self.selection_end = self.selection_start
+            self.selection_in_lane = False
+            self.selection_in_pedal = False
+
+        self.audio.seek(self.selection_start[0])
+        self.set_play_position(self.selection_start[0])
+        self.update()
+
+    def set_lyric_mode(self, enabled):
+        enabled = bool(enabled)
+
+        if self.lyric_mode == enabled:
+            return
+
+        self.lyric_mode = enabled
+        self.unsetCursor()
+        self.update()
+
+    def toggle_lyric_mode(self):
+        self.set_lyric_mode(not self.lyric_mode)
+        return self.lyric_mode
+
+    def _track_index_of(self, note):
+        for i, track in enumerate(self.midi.tracks):
+            for n in track.notes:
+                if n is note:
+                    return i
+
+        return None
+
+    def _edit_lyric_chain(self, note):
+        """ノートの歌詞を入力する。
+
+        クリックしたノートが選択範囲に含まれる場合は、
+        選択されたノーツ(同じトラック内)を時系列順に
+        選択範囲の先頭から順番に入力していく。
+        選択範囲に無い単一ノートの場合はその1つだけ入力する。
+        OKで次へ進み、キャンセル/Escで終了する。
+        歌詞はプロジェクト保存時にノーツごとに記録される。
+        """
+        track_index = self._track_index_of(note)
+
+        if track_index is None:
+            return
+
+        sel_ids = {
+            id(n)
+            for n in self.selected_notes
+        }
+
+        selected_in_track = [
+            n
+            for n in self.midi.tracks[track_index].notes
+            if id(n) in sel_ids
+        ]
+
+        if (
+            id(note) in sel_ids and
+            len(selected_in_track) >= 2
+        ):
+            # 選択されたノーツだけを時系列順に処理する
+            # (クリック位置に関係なく選択範囲の先頭から開始)
+            ordered = sorted(
+                selected_in_track,
+                key=lambda n: n.start
+            )
+
+            idx = 0
+        else:
+            # 選択範囲に無い単一ノートはその1つだけ入力する
+            ordered = [note]
+            idx = 0
+
+        undo_pushed = False
+
+        while 0 <= idx < len(ordered):
+            target = ordered[idx]
+
+            text, ok = QInputDialog.getText(
+                self,
+                "歌詞の入力",
+                f"歌詞 ({idx + 1}/{len(ordered)}):",
+                text=getattr(target, "lyric", "")
+            )
+
+            if not ok:
+                break
+
+            if getattr(target, "lyric", "") != text:
+                if not undo_pushed:
+                    self.midi.push_undo()
+                    undo_pushed = True
+
+                target.lyric = text
+                self.midi._bump()
+
+            idx += 1
+
+        if undo_pushed:
+            if self.audio.playing:
+                self.audio.invalidate_midi_cache()
+
+        self.update()
+
     def keyPressEvent(
         self,
         event
     ):
-        if event.key() == Qt.Key_Space:
+        key = event.key()
+        modifiers = event.modifiers()
+
+        if (
+            key == Qt.Key_Escape and
+            not event.isAutoRepeat() and
+            self.lyric_mode
+        ):
+            # Escで歌詞入力モードを終了する
+            self.set_lyric_mode(False)
+            event.accept()
+            return
+
+        if self.tap_mode:
+            if key == Qt.Key_Space:
+                if not event.isAutoRepeat():
+                    if modifiers & Qt.ShiftModifier:
+                        self._register_tap()
+                    else:
+                        # 計測中のSpaceは再生の停止を意味し、
+                        # 停止処理内で計測結果が確定・反映される
+                        if self.audio.playing:
+                            self.toggle_play()
+                        else:
+                            self.finish_tap_tempo(True)
+
+                event.accept()
+                return
+
+            if key in (
+                Qt.Key_Return,
+                Qt.Key_Enter
+            ) and not event.isAutoRepeat():
+                self.finish_tap_tempo(True)
+                event.accept()
+                return
+
+            if (
+                key == Qt.Key_Escape and
+                not event.isAutoRepeat()
+            ):
+                self.finish_tap_tempo(False)
+                event.accept()
+                return
+
+        if key == Qt.Key_Space:
+            if modifiers & Qt.ShiftModifier:
+                # Shift+Space(タップ計測)は再生中のみ受け付ける。
+                # 停止中は何もせず、再生切替も起こさない。
+                if not event.isAutoRepeat():
+                    self.tap_tempo_trigger()
+
+                event.accept()
+                return
+
+            if self.tap_mode:
+                # 計測中の誤って再生を切り替えるのを防ぐ
+                event.accept()
+                return
+
             self.toggle_play()
             event.accept()
             return
@@ -1005,6 +1386,48 @@ class PianoRoll(QWidget):
             self.bottom_height
         )
 
+        if self.lyric_mode:
+            # 歌詞入力モード中:
+            # 左クリック = 歌詞入力(選択範囲内なら連続入力)
+            # 右ドラッグ = 手動範囲選択(ノーツの移動等は行わない)
+            if event.button() == Qt.LeftButton:
+                if (
+                    y >= self.top_height and
+                    y < lane_top and
+                    x >= self.left_width
+                ):
+                    if self.selection_mode:
+                        # 範囲選択中の左クリックは確定として扱う
+                        self.selection_end = (
+                            self.snap_time(
+                                self.x_to_time(x),
+                                mode="floor"
+                            ),
+                            self.y_to_pitch(y)
+                        )
+
+                        self.finish_selection()
+                        event.accept()
+                        return
+
+                    note = self.note_at(x, y)
+
+                    if note is not None:
+                        self._edit_lyric_chain(note)
+
+                event.accept()
+                return
+
+            if event.button() == Qt.RightButton:
+                if not self.audio.playing:
+                    self._start_range_selection(x, y, lane_top)
+
+                event.accept()
+                return
+
+            event.accept()
+            return
+
         if event.button() == Qt.RightButton:
             if self.audio.playing:
                 return
@@ -1178,37 +1601,8 @@ class PianoRoll(QWidget):
                     self.update()
 
 
-            self.selection_mode = True
-            self.selection_rect = None
-            
-            if y >= lane_top + self.velocity_lane_height:
-                self.selection_start = (
-                    self.snap_time(
-                        self.x_to_time(x),
-                        mode="floor"
-                    ),
-                    self.min_pitch
-                )
-                self.selection_end = self.selection_start
-                self.selection_in_lane = True
-                self.selection_in_pedal = True
-            else:
-                self.selection_start = (
-                    self.snap_time(
-                        self.x_to_time(x),
-                        mode="floor"
-                    ),
-                    self.y_to_pitch(y)
-                )
-                self.selection_end = self.selection_start
-                self.selection_in_lane = False
-                self.selection_in_pedal = False
-
-            self.audio.seek(self.selection_start[0])
-            self.set_play_position(self.selection_start[0])
-            self.update()
+            self._start_range_selection(x, y, lane_top)
             return
-
         if (
             y >= lane_top and
             event.button() == Qt.LeftButton
@@ -1511,6 +1905,11 @@ class PianoRoll(QWidget):
             x = event.position().x()
             y = event.position().y()
 
+            if self.lyric_mode:
+                # 歌詞入力モード中はダブルクリック削除を無効化する
+                event.accept()
+                return
+
             if y < self.top_height:
                 if self.edit_marker_at(x, y):
                     event.accept()
@@ -1655,9 +2054,9 @@ class PianoRoll(QWidget):
 
         spin = QDoubleSpinBox()
         spin.setRange(20.0, 999.0)
-        spin.setDecimals(1)
+        spin.setDecimals(0)
         spin.setSuffix(" BPM")
-        spin.setValue(bpm)
+        spin.setValue(round(bpm))
         layout.addWidget(spin)
 
         del_check = QCheckBox(
@@ -2212,6 +2611,12 @@ class PianoRoll(QWidget):
             return
 
         if self.selection_mode:
+            self.setCursor(
+                Qt.CrossCursor
+            )
+            return
+
+        if self.lyric_mode:
             self.setCursor(
                 Qt.CrossCursor
             )
@@ -4141,6 +4546,201 @@ class PianoRoll(QWidget):
                     note_bottom
                 )
 
+    def draw_tap_overlay(
+        self,
+        painter
+    ):
+        if not self.tap_mode:
+            return
+
+        top = self.top_height
+        bottom = self.height() - self.bottom_height
+
+        if bottom <= top:
+            return
+
+        bpm = max(
+            1.0,
+            self._tap_disp_bpm
+        )
+
+        spb = 60.0 / bpm
+
+        phi = self._tap_disp_phi
+
+        visible_start = max(
+            0.0,
+            self.scroll_x
+        )
+
+        visible_end = self.x_to_time(
+            self.width()
+        )
+
+        k0 = int(
+            math.floor(
+                (visible_start - phi) / spb
+            )
+        ) - 1
+
+        k1 = int(
+            math.ceil(
+                (visible_end - phi) / spb
+            )
+        ) + 1
+
+        pulse = TapTempoEngine.beat_pulse(
+            self._tap_fit
+        )
+
+        width = self.width()
+
+        for k in range(k0, k1 + 1):
+            beat_time = phi + k * spb
+
+            x = self.time_to_x(beat_time)
+
+            if x < self.left_width:
+                continue
+
+            if x > width:
+                break
+
+            major = (
+                k % 4 == 0
+                if k >= 0
+                else False
+            )
+
+            base_alpha = 120 if major else 70
+            alpha = int(
+                base_alpha * (0.6 + 0.4 * pulse)
+            )
+
+            painter.setPen(
+                QPen(
+                    QColor(
+                        90,
+                        215,
+                        255,
+                        alpha
+                    ),
+                    2 if major else 1
+                )
+            )
+
+            painter.drawLine(
+                int(x),
+                top,
+                int(x),
+                bottom
+            )
+
+        font = QFont(
+            "Segoe UI",
+            10
+        )
+
+        painter.setFont(font)
+
+        fit = self._tap_fit
+
+        if fit is None or fit["n"] < 2:
+            text = "拍に合わせて Shift+Space を連打してください（Space: 停止して適用 / Esc: キャンセル）"
+
+            fm = painter.fontMetrics()
+
+            tw = fm.horizontalAdvance(text)
+
+            bx = max(
+                self.left_width,
+                (
+                    width + self.left_width - tw
+                ) // 2
+            )
+
+            painter.fillRect(
+                bx - 8,
+                top + 6,
+                tw + 16,
+                fm.height() + 8,
+                QColor(
+                    20,
+                    22,
+                    28,
+                    200
+                )
+            )
+
+            painter.setPen(
+                QPen(
+                    QColor(
+                        235,
+                        235,
+                        240
+                    )
+                )
+            )
+
+            painter.drawText(
+                bx,
+                top + 8 +
+                fm.ascent() + 4,
+                text
+            )
+            return
+
+        rms = fit["rms_ms"]
+
+        disp_bpm = int(math.floor(self._tap_disp_bpm + 0.5))
+
+        if fit["n"] >= MIN_TAPS_FOR_APPLY:
+            text = (
+                f"{disp_bpm} BPM   "
+                f"{fit['n']}タップ  ±{rms:.0f}ms"
+            )
+        else:
+            text = (
+                f"{disp_bpm} BPM   "
+                f"{fit['n']}/{MIN_TAPS_FOR_APPLY}タップ"
+            )
+
+        fm = painter.fontMetrics()
+
+        tw = fm.horizontalAdvance(text)
+
+        bx = width - tw - 24
+
+        painter.fillRect(
+            bx - 8,
+            top + 6,
+            tw + 16,
+            fm.height() + 8,
+            QColor(
+                20,
+                22,
+                28,
+                200
+            )
+        )
+
+        painter.setPen(
+            QPen(
+                QColor(
+                    90,
+                    215,
+                    255
+                )
+            )
+        )
+
+        painter.drawText(
+            bx,
+            top + 8 +
+            fm.ascent() + 4,
+            text
+        )
+
     def _ensure_note_cache(self):
         if (
             getattr(self, "_notes_starts_version", -1) !=
@@ -4242,6 +4842,20 @@ class PianoRoll(QWidget):
     ):
         self._ensure_note_cache()
 
+        # ドラッグ中のノーツは位置が毎フレーム変わるため、
+        # mutation_version を更新しない限り starts キャッシュ(描画範囲
+        # の判定に使用)は古いまま。キャッシュ経由で描画すると画面外
+        # から移動してきたノーツが描画漏れするため、ドラッグ対象は
+        # 通常ループから外し、末尾でライブ座標により描画する。
+        drag_ids = set()
+
+        if self.drag_original_notes:
+            for n, _os, _op, _od in self.drag_original_notes:
+                drag_ids.add(id(n))
+
+        if self.drag_note is not None:
+            drag_ids.add(id(self.drag_note))
+
         visible_start = max(
             0.0,
             self.scroll_x
@@ -4320,7 +4934,7 @@ class PianoRoll(QWidget):
             )
 
             for note in notes[i0:i1]:
-                if note is self.drag_note:
+                if id(note) in drag_ids:
                     continue
 
                 y = self.pitch_to_y(
@@ -4379,7 +4993,7 @@ class PianoRoll(QWidget):
                 )
 
             for note in long_notes[li0:li1]:
-                if note is self.drag_note:
+                if id(note) in drag_ids:
                     continue
 
                 y = self.pitch_to_y(
@@ -4437,14 +5051,44 @@ class PianoRoll(QWidget):
                     3
                 )
 
-        drag_note = self.drag_note
+        drag_entries = []
 
-        if drag_note is not None:
-            pens = self._note_pens.get(
-                self.drag_track_index
+        if self.drag_original_notes:
+            for n, _os, _op, _od in self.drag_original_notes:
+                drag_entries.append(n)
+
+        if (
+            self.drag_note is not None and
+            not any(
+                e is self.drag_note
+                for e in drag_entries
+            )
+        ):
+            drag_entries.append(self.drag_note)
+
+        if drag_entries:
+            sel_set = (
+                {
+                    id(note)
+                    for note in self.selected_notes
+                }
+                if self.selected_notes
+                else None
             )
 
-            if pens is not None:
+            for drag_note in drag_entries:
+                track_index = self._note_track_map.get(
+                    id(drag_note),
+                    getattr(self, "drag_track_index", 0)
+                )
+
+                pens = self._note_pens.get(
+                    track_index
+                )
+
+                if pens is None:
+                    continue
+
                 (
                     fill_brush,
                     outline_pen,
@@ -4452,63 +5096,125 @@ class PianoRoll(QWidget):
                     sel_pen
                 ) = pens
 
-                sel_set = (
-                    {
-                        id(note)
-                        for note in self.selected_notes
-                    }
-                    if self.selected_notes
-                    else None
-                )
-
                 y = self.pitch_to_y(
                     drag_note.pitch
                 )
 
                 if (
                     y +
-                    self.note_height >=
-                    note_top and
-                    y <= note_bottom
+                    self.note_height <
+                    note_top or
+                    y > note_bottom
                 ):
-                    x = self.time_to_x(
-                        drag_note.start
-                    )
+                    continue
 
-                    width = (
-                        drag_note.duration /
-                        self.seconds_per_pixel
-                    )
+                x = self.time_to_x(
+                    drag_note.start
+                )
 
-                    if (
-                        not (
-                            x +
-                            width <
-                            self.left_width or
-                            x > self.width()
-                        )
-                    ):
-                        if (
-                            sel_set is not None and
-                            id(drag_note) in sel_set
-                        ):
-                            painter.setPen(sel_pen)
-                            painter.setBrush(sel_brush)
-                        else:
-                            painter.setPen(outline_pen)
-                            painter.setBrush(fill_brush)
+                width = (
+                    drag_note.duration /
+                    self.seconds_per_pixel
+                )
 
-                        painter.drawRoundedRect(
-                            int(x),
-                            int(y + 2),
-                            max(
-                                1,
-                                int(width)
-                            ),
-                            self.note_height - 4,
-                            3,
-                            3
-                        )
+                if (
+                    x +
+                    width <
+                    self.left_width or
+                    x > self.width()
+                ):
+                    continue
+
+                if (
+                    sel_set is not None and
+                    id(drag_note) in sel_set
+                ):
+                    painter.setPen(sel_pen)
+                    painter.setBrush(sel_brush)
+                else:
+                    painter.setPen(outline_pen)
+                    painter.setBrush(fill_brush)
+
+                painter.drawRoundedRect(
+                    int(x),
+                    int(y + 2),
+                    max(
+                        1,
+                        int(width)
+                    ),
+                    self.note_height - 4,
+                    3,
+                    3
+                )
+
+    def draw_lyrics(self, painter):
+        """ノーツに設定された歌詞をノートの左上に描画する。"""
+        if self.midi.filter_track is None:
+            track_items = list(
+                enumerate(self.midi.tracks)
+            )
+        else:
+            index = self.midi.filter_track
+
+            if 0 <= index < len(self.midi.tracks):
+                track_items = [
+                    (index, self.midi.tracks[index])
+                ]
+            else:
+                track_items = []
+
+        visible_start = max(
+            0.0,
+            self.scroll_x
+        )
+
+        visible_end = self.x_to_time(
+            self.width()
+        )
+
+        note_bottom = (
+            self.height() -
+            self.bottom_height
+        )
+
+        font = QFont()
+        font.setPointSize(8)
+        painter.setFont(font)
+
+        for _track_index, track in track_items:
+            for note in track.notes:
+                lyric = getattr(note, "lyric", "")
+
+                if not lyric:
+                    continue
+
+                end = note.start + note.duration
+
+                if (
+                    end < visible_start or
+                    note.start > visible_end
+                ):
+                    continue
+
+                y = self.pitch_to_y(note.pitch)
+
+                if (
+                    y < self.top_height or
+                    y > note_bottom
+                ):
+                    continue
+
+                x = self.time_to_x(note.start)
+
+                painter.setPen(
+                    QColor(255, 235, 150, 235)
+                )
+                painter.setBrush(Qt.NoBrush)
+
+                painter.drawText(
+                    QPointF(x + 1.0, y - 1.0),
+                    lyric
+                )
 
     def draw_selection(
         self,
@@ -6096,6 +6802,11 @@ class PianoRoll(QWidget):
                 painter
             )
 
+            if self.lyric_mode:
+                self.draw_lyrics(
+                    painter
+                )
+
             self.draw_keyboard(
                 painter
             )
@@ -6103,6 +6814,11 @@ class PianoRoll(QWidget):
             self.draw_time_labels(
                 painter
             )
+
+            if self.tap_mode:
+                self.draw_tap_overlay(
+                    painter
+                )
 
             self.draw_play_position(
                 painter
