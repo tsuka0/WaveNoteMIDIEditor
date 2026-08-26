@@ -8,6 +8,7 @@ from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont, QKeySequence, Q
 from .midi import PedalEvent
 from .taptempo import TapTempoEngine, MIN_TAPS_FOR_APPLY
 from .i18n import tr
+from .features import ENABLE_LYRICS
 
 class PianoRoll(QWidget):
     marker_edited = Signal()
@@ -832,6 +833,9 @@ class PianoRoll(QWidget):
         self.update()
 
     def set_lyric_mode(self, enabled):
+        if not ENABLE_LYRICS:
+            return
+
         enabled = bool(enabled)
 
         if self.lyric_mode == enabled:

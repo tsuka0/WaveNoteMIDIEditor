@@ -63,6 +63,7 @@ from module.midiout import list_ports
 from module.settings import load_value, save_value, delete_value, load_last_dir, save_last_dir_from_path
 from module.i18n import tr, get_language, set_language, LANGUAGES
 from module.discord_rpc import DiscordRPC
+from module.features import ENABLE_LYRICS, ENABLE_SVP
 
 DISCORD_CLIENT_ID = "1539710543751942214"
 
@@ -75,9 +76,11 @@ DEFAULT_SHORTCUTS = {
     "action_redo": "Ctrl+Y",
     "action_play": "Space",
     "action_split": "S",
-    "action_select_all": "Ctrl+A",
-    "action_lyric_mode": "L"
+    "action_select_all": "Ctrl+A"
 }
+
+if ENABLE_LYRICS:
+    DEFAULT_SHORTCUTS["action_lyric_mode"] = "L"
 
 def get_shortcut(key):
     val = load_value(f"shortcut_{key}")
@@ -225,9 +228,11 @@ class ShortcutDialog(QDialog):
             "action_redo": tr("やり直し", "Redo"),
             "action_play": tr("再生 / 停止", "Play / Stop"),
             "action_split": tr("ノーツを分割", "Split Notes"),
-            "action_select_all": tr("すべて選択", "Select All"),
-            "action_lyric_mode": tr("歌詞入力モード", "Lyric Input Mode")
+            "action_select_all": tr("すべて選択", "Select All")
         }
+
+        if ENABLE_LYRICS:
+            labels["action_lyric_mode"] = tr("歌詞入力モード", "Lyric Input Mode")
         
         for key, label in labels.items():
             edit = QKeySequenceEdit()
@@ -894,7 +899,9 @@ class MainWindow(QMainWindow):
         ext = Path(path).suffix.lower()
         if ext == ".wnp":
             self.load_project(path)
-        elif ext in (".mid", ".midi", ".svp"):
+        elif ext in (".mid", ".midi") or (
+            ENABLE_SVP and ext == ".svp"
+        ):
             self.load_midi_file(path)
         elif ext in (".wav", ".mp3", ".flac", ".ogg", ".m4a"):
             self.load_audio_file(path)
@@ -961,7 +968,12 @@ class MainWindow(QMainWindow):
         save_project_action.setShortcut(QKeySequence.StandardKey.Save)
         save_project_action.triggered.connect(self.save_project)
 
-        open_midi_action = QAction(tr("MIDI / SVPを開く", "Open MIDI / SVP"), self)
+        if ENABLE_SVP:
+            open_midi_label = tr("MIDI / SVPを開く", "Open MIDI / SVP")
+        else:
+            open_midi_label = tr("MIDIを開く", "Open MIDI")
+
+        open_midi_action = QAction(open_midi_label, self)
         open_midi_action.triggered.connect(self.open_midi)
 
         open_audio_action = QAction(tr("オーディオを開く", "Open Audio"), self)
@@ -1065,24 +1077,25 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(select_all_action)
         self.actions["action_select_all"] = select_all_action
 
-        lyric_mode_action = QAction(
-            tr("歌詞入力モード", "Lyric Input Mode"),
-            self
-        )
-        lyric_mode_action.setCheckable(True)
-        lyric_mode_action.setToolTip(
-            tr(
-                "ノーツをクリックして歌詞を入力します。"
-                "右ドラッグやCtrl+Aで選択したノーツには時系列順に連続入力できます(L)",
-                "Click notes to enter lyrics. "
-                "Notes selected via right-drag or Ctrl+A can be filled in order (L)"
+        if ENABLE_LYRICS:
+            lyric_mode_action = QAction(
+                tr("歌詞入力モード", "Lyric Input Mode"),
+                self
             )
-        )
-        lyric_mode_action.triggered.connect(
-            self.toggle_lyric_mode
-        )
-        edit_menu.addAction(lyric_mode_action)
-        self.actions["action_lyric_mode"] = lyric_mode_action
+            lyric_mode_action.setCheckable(True)
+            lyric_mode_action.setToolTip(
+                tr(
+                    "ノーツをクリックして歌詞を入力します。"
+                    "右ドラッグやCtrl+Aで選択したノーツには時系列順に連続入力できます(L)",
+                    "Click notes to enter lyrics. "
+                    "Notes selected via right-drag or Ctrl+A can be filled in order (L)"
+                )
+            )
+            lyric_mode_action.triggered.connect(
+                self.toggle_lyric_mode
+            )
+            edit_menu.addAction(lyric_mode_action)
+            self.actions["action_lyric_mode"] = lyric_mode_action
 
         stop_action = QAction(
             tr("停止", "Stop"),
@@ -1887,18 +1900,25 @@ class MainWindow(QMainWindow):
         }
 
         for track in self.midi.tracks:
+            def note_dict(note):
+                data = {
+                    "start": note.start,
+                    "duration": note.duration,
+                    "pitch": note.pitch,
+                    "velocity": note.velocity,
+                    "channel": getattr(note, "channel", track.channel),
+                }
+
+                if ENABLE_LYRICS:
+                    data["lyric"] = getattr(note, "lyric", "")
+
+                return data
+
             project["midi_tracks"].append({
                 "name": track.name,
                 "channel": track.channel,
                 "notes": [
-                    {
-                        "start": note.start,
-                        "duration": note.duration,
-                        "pitch": note.pitch,
-                        "velocity": note.velocity,
-                        "channel": getattr(note, "channel", track.channel),
-                        "lyric": getattr(note, "lyric", ""),
-                    }
+                    note_dict(note)
                     for note in track.notes
                 ],
                 "pedals": [
@@ -2088,15 +2108,19 @@ class MainWindow(QMainWindow):
             track = self.midi.add_track(name=track_data.get("name"))
             track.channel = track_data.get("channel", len(self.midi.tracks) - 1)
             for note_data in track_data.get("notes", []):
+                note_kwargs = {
+                    "start": note_data["start"],
+                    "duration": note_data["duration"],
+                    "pitch": note_data["pitch"],
+                    "velocity": note_data.get("velocity", 100),
+                    "channel": note_data.get("channel", track.channel),
+                }
+
+                if ENABLE_LYRICS:
+                    note_kwargs["lyric"] = note_data.get("lyric", "")
+
                 track.notes.append(
-                    Note(
-                        start=note_data["start"],
-                        duration=note_data["duration"],
-                        pitch=note_data["pitch"],
-                        velocity=note_data.get("velocity", 100),
-                        channel=note_data.get("channel", track.channel),
-                        lyric=note_data.get("lyric", "")
-                    )
+                    Note(**note_kwargs)
                 )
             for pedal_data in track_data.get("pedals", []):
                 track.pedals.append(
@@ -2288,6 +2312,9 @@ class MainWindow(QMainWindow):
         self.editor.update()
 
     def toggle_lyric_mode(self):
+        if not ENABLE_LYRICS:
+            return
+
         has_notes = any(
             track.notes
             for track in self.midi.tracks
@@ -2598,11 +2625,22 @@ class MainWindow(QMainWindow):
             self.load_project(path)
 
     def open_midi(self):
+        if ENABLE_SVP:
+            title = tr("MIDI / SVPを開く", "Open MIDI / SVP")
+            file_filter = (
+                "MIDI / Synthesizer V Project (*.mid *.midi *.svp);;"
+                "MIDI Files (*.mid *.midi);;"
+                "Synthesizer V Project (*.svp)"
+            )
+        else:
+            title = tr("MIDIを開く", "Open MIDI")
+            file_filter = "MIDI Files (*.mid *.midi)"
+
         path, _ = QFileDialog.getOpenFileName(
             self,
-            tr("MIDI / SVPを開く", "Open MIDI / SVP"),
+            title,
             load_last_dir(),
-            "MIDI / Synthesizer V Project (*.mid *.midi *.svp);;MIDI Files (*.mid *.midi);;Synthesizer V Project (*.svp)"
+            file_filter
         )
 
         if path:
@@ -2621,13 +2659,21 @@ class MainWindow(QMainWindow):
         save_last_dir_from_path(path)
 
         try:
-            if Path(path).suffix.lower() == ".svp":
+            if Path(path).suffix.lower() == ".svp" and ENABLE_SVP:
                 self.midi.load_svp(path)
+            elif Path(path).suffix.lower() == ".svp":
+                raise ValueError(
+                    tr(
+                        "このバージョンではSVPファイルを読み込めません",
+                        "SVP files are not supported in this version"
+                    )
+                )
             else:
                 self.midi.load(path)
 
             self._last_midi_path = path
             self._last_midi_is_svp = (
+                ENABLE_SVP and
                 Path(path).suffix.lower() == ".svp"
             )
 
@@ -2659,7 +2705,7 @@ class MainWindow(QMainWindow):
     def save_midi(self):
         if self._last_midi_path:
             try:
-                if self._last_midi_is_svp:
+                if self._last_midi_is_svp and ENABLE_SVP:
                     self.midi.save_svp(self._last_midi_path)
                     QMessageBox.information(
                         self,
@@ -2686,11 +2732,20 @@ class MainWindow(QMainWindow):
             self.save_midi_as()
 
     def save_midi_as(self):
+        if ENABLE_SVP:
+            file_filter = (
+                "MIDI Files (*.mid *.midi);;"
+                "WAV Files (*.wav);;"
+                "Synthesizer V Project (*.svp)"
+            )
+        else:
+            file_filter = "MIDI Files (*.mid *.midi);;WAV Files (*.wav)"
+
         path, selected_filter = QFileDialog.getSaveFileName(
             self,
             tr("書き出しを保存", "Export As"),
             load_last_dir(),
-            "MIDI Files (*.mid *.midi);;WAV Files (*.wav);;Synthesizer V Project (*.svp)"
+            file_filter
         )
 
         if not path:
@@ -2723,8 +2778,11 @@ class MainWindow(QMainWindow):
                     tr("WAVファイルの書き出しが完了しました。", "WAV export completed.")
                 )
             elif (
-                selected_filter == "Synthesizer V Project (*.svp)" or
-                path.lower().endswith(".svp")
+                ENABLE_SVP and
+                (
+                    selected_filter == "Synthesizer V Project (*.svp)" or
+                    path.lower().endswith(".svp")
+                )
             ):
                 if not path.lower().endswith(".svp"):
                     path += ".svp"

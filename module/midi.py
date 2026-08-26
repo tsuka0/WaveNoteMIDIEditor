@@ -7,6 +7,7 @@ import math
 import uuid as uuidlib
 import mido
 from .i18n import tr
+from .features import ENABLE_SVP
 
 # Synthesizer V Studio の時間単位 blick。
 # 1四分音符 = 705,600,000 blick (公式スクリプトAPIの SV.QUARTER 相当)
@@ -35,6 +36,17 @@ class Track:
     notes: list = field(default_factory=list)
     pedals: list = field(default_factory=list)
     channel: int = 0
+
+def shiftjis_safe_text(text):
+    """MIDIテキストイベント用にCP932(Shift-JIS)で表現できる文字列にする。
+
+    対応していない文字は '?' に置き換える。
+    """
+    try:
+        text.encode("cp932")
+        return text
+    except UnicodeEncodeError:
+        return text.encode("cp932", errors="replace").decode("cp932")
 
 class MidiData:
     def __init__(self):
@@ -1099,7 +1111,7 @@ class MidiData:
     def save(self, path):
         midi = mido.MidiFile(
             ticks_per_beat=480,
-            charset='utf-8'
+            charset='cp932'
         )
 
         ticks_per_beat = 480
@@ -1192,7 +1204,7 @@ class MidiData:
                 mtrack.append(
                     mido.MetaMessage(
                         "track_name",
-                        name=track.name,
+                        name=shiftjis_safe_text(track.name),
                         time=0
                     )
                 )
@@ -1408,6 +1420,9 @@ class MidiData:
         時間単位は blick (1四分音符 = 705,600,000 blick)。
         ノーツの歌詞は lyrics フィールドに書き込まれる。
         """
+        if not ENABLE_SVP:
+            raise RuntimeError("SVP support is disabled (module/features.py)")
+
         self._ensure_caches()
 
         marks = self._svp_tempo_marks()
@@ -1612,6 +1627,9 @@ class MidiData:
         Synthesizer V Studio 1 / 2 のどちらで保存されたファイルでも
         読み込める (gzip圧縮 / 先頭BOM / NUL区切りの複数JSONに対応)。
         """
+        if not ENABLE_SVP:
+            raise RuntimeError("SVP support is disabled (module/features.py)")
+
         with open(path, "rb") as f:
             raw = f.read()
 
