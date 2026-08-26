@@ -1,4 +1,4 @@
-﻿import os
+import os
 import time
 import sys
 import ctypes
@@ -50,7 +50,8 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QKeySequenceEdit,
-    QSizePolicy
+    QSizePolicy,
+    QWidget
 )
 from PySide6.QtGui import QAction, QKeySequence, QIcon
 from PySide6.QtCore import QTimer, Qt, QEvent, QObject
@@ -75,7 +76,6 @@ DEFAULT_SHORTCUTS = {
     "action_play": "Space",
     "action_split": "S",
     "action_select_all": "Ctrl+A",
-    "action_tap_tempo": "Shift+Space",
     "action_lyric_mode": "L"
 }
 
@@ -93,6 +93,31 @@ def toggle_button_style(checked_color):
         f"QPushButton:checked {{ background-color: {checked_color}; "
         f"border-color: {checked_color}; color: white; font-weight: bold; }}"
     )
+
+
+def make_help_badge(tooltip):
+    badge = QLabel("?")
+    badge.setToolTip(tooltip)
+    badge.setAlignment(Qt.AlignCenter)
+    badge.setFixedSize(14, 14)
+    badge.setStyleSheet(
+        "QLabel { color: #999; border: 1px solid #888; border-radius: 7px;"
+        " font-size: 9px; font-weight: bold; }"
+        "QLabel:hover { color: #fff; border-color: #fff; }"
+    )
+    return badge
+
+
+def label_with_help(text, tooltip, tail=""):
+    container = QWidget()
+    layout = QHBoxLayout(container)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(1)
+    layout.addWidget(QLabel(text))
+    layout.addWidget(make_help_badge(tooltip))
+    if tail:
+        layout.addWidget(QLabel(tail))
+    return container
 
 AUDIO_PRESETS_KEY = "audio_presets"
 
@@ -201,7 +226,6 @@ class ShortcutDialog(QDialog):
             "action_play": tr("再生 / 停止", "Play / Stop"),
             "action_split": tr("ノーツを分割", "Split Notes"),
             "action_select_all": tr("すべて選択", "Select All"),
-            "action_tap_tempo": tr("テンポを手動計測(タップ)", "Tap Tempo"),
             "action_lyric_mode": tr("歌詞入力モード", "Lyric Input Mode")
         }
         
@@ -680,6 +704,7 @@ class MainWindow(QMainWindow):
         self._analysis_token = 0
         self._pending_audio_duration = None
         self._pending_tempo_analysis = None
+        self._pending_tap_onsets = None
         self._project_path = None
         self._last_midi_path = None
         self._last_midi_is_svp = False
@@ -1070,22 +1095,6 @@ class MainWindow(QMainWindow):
             stop_action
         )
 
-        tap_tempo_action = QAction(
-            tr("テンポを手動計測(タップ)", "Tap Tempo"),
-            self
-        )
-        tap_tempo_action.setToolTip(
-            "音声の拍に合わせて Shift+Space を連打してテンポを計測します"
-        )
-        tap_tempo_action.triggered.connect(
-            self.trigger_tap_tempo
-        )
-        playback_menu.addAction(
-            tap_tempo_action
-        )
-
-        self.actions["action_tap_tempo"] = tap_tempo_action
-
         settings_menu = self.menuBar().addMenu(
             tr("設定", "Settings")
         )
@@ -1109,12 +1118,19 @@ class MainWindow(QMainWindow):
         toolbar.setMovable(False)
         toolbar.setContextMenuPolicy(Qt.PreventContextMenu)
 
-        track_label = QLabel(
-            tr("  トラック ", "  Track ")
-        )
-
         toolbar.addWidget(
-            track_label
+            label_with_help(
+                "  " + tr("トラック", "Track"),
+                tr(
+                    "表示・編集するトラックを選択します。\n"
+                    "「すべてのトラック」を選ぶと全トラックのノーツを表示します。\n"
+                    "リスト上で右クリックするとトラック名を変更できます。",
+                    "Selects the track to view and edit.\n"
+                    "\"All Tracks\" shows notes from every track.\n"
+                    "Right-click an entry to rename the track."
+                ),
+                tail=" "
+            )
         )
 
         self.track_combo = QComboBox()
@@ -1180,12 +1196,17 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(
             insert_timesig_button
         )
-        length_label = QLabel(
-            tr("  ノート長 ", "  Note Length ")
-        )
-
         toolbar.addWidget(
-            length_label
+            label_with_help(
+                "  " + tr("ノート長", "Note Length"),
+                tr(
+                    "配置や分割をするノーツの長さです。\n"
+                    "4分音符(1拍)が基準で、3連音符や付点の長さも選べます。",
+                    "The length used when placing or splitting notes.\n"
+                    "A quarter note (1 beat) is the base; triplets and dotted lengths are also available."
+                ),
+                tail=" "
+            )
         )
 
         self.length_combo = QComboBox()
@@ -1280,22 +1301,24 @@ class MainWindow(QMainWindow):
         audio_toolbar.setContextMenuPolicy(Qt.PreventContextMenu)
 
         # Audio Presets
-        preset_label = QLabel(tr("  プリセット: ", "  Preset: "))
-        audio_toolbar.addWidget(preset_label)
+        audio_toolbar.addWidget(
+            label_with_help(
+                "  " + tr("プリセット", "Preset"),
+                tr(
+                    "チャンネルとEQの組み合わせにワンタッチで切り替えられます。\n"
+                    "「現在の設定をプリセット保存...」で追加、"
+                    "「プリセットの管理...」で編集・削除できます。",
+                    "Switches between saved combinations of channel mode and EQ.\n"
+                    "Use \"Save Current Settings as Preset...\" to add, and\n"
+                    "\"Manage Presets...\" to edit or remove them."
+                ),
+                tail=": "
+            )
+        )
 
         self.preset_combo = QComboBox()
         self.preset_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         self.preset_combo.setMaximumWidth(160)
-        self.preset_combo.setToolTip(
-            tr(
-                "チャンネルとEQの組み合わせプリセット。\n"
-                "「現在の設定をプリセット保存...」で追加、"
-                "「プリセットの管理...」で編集・削除できます",
-                "Presets combining channel mode and EQ.\n"
-                "Use \"Save Current Settings as Preset...\" to add, and\n"
-                "\"Manage Presets...\" to edit or remove them"
-            )
-        )
         self.preset_combo.currentIndexChanged.connect(
             self.change_audio_preset
         )
@@ -1303,16 +1326,40 @@ class MainWindow(QMainWindow):
         self.rebuild_preset_combo()
 
         # Channel Mode
-        channel_label = QLabel(tr("  解析/音声: ", "  Analysis/Audio: "))
-        audio_toolbar.addWidget(channel_label)
+        audio_toolbar.addWidget(
+            label_with_help(
+                "  " + tr("解析/音声", "Analysis/Audio"),
+                tr(
+                    "音声の再生方法と解析の入力を選択します。\n"
+                    "L-R (ボーカルキャンセル): 左右の差を取って中央の音(ボーカル等)を小さくします。\n"
+                    "選択した内容はスペクトラム解析にも使われます。",
+                    "Chooses how the audio is played and analyzed.\n"
+                    "L-R (vocal cancel): subtracts the channels to reduce center-panned sounds such as vocals.\n"
+                    "The selection also feeds the spectrum analysis."
+                ),
+                tail=": "
+            )
+        )
         self.channel_combo = QComboBox()
         self.channel_combo.addItems(CHANNEL_MODE_LABELS)
         self.channel_combo.currentIndexChanged.connect(self.change_channel_mode)
         audio_toolbar.addWidget(self.channel_combo)
         
         # Simple EQ
-        eq_label = QLabel("  EQ: ")
-        audio_toolbar.addWidget(eq_label)
+        audio_toolbar.addWidget(
+            label_with_help(
+                "  EQ",
+                tr(
+                    "EQ(イコライザー)とは、音を低域・中域・高域の3つの音域に分けて、\n"
+                    "それぞれの大きさを調整する機能です。\n"
+                    "例: 低域を上げるとベースが、中域を上げるとメロディが聞き取りやすくなります。",
+                    "EQ (equalizer) splits the sound into three bands (low / mid / high)\n"
+                    "and adjusts the volume of each.\n"
+                    "e.g. raising the low band makes the bass stand out, raising the mid makes the melody clearer."
+                ),
+                tail=": "
+            )
+        )
         
         # Low EQ
         self.eq_low_label = QLabel(tr(" 低域", " Low"))
@@ -1357,10 +1404,18 @@ class MainWindow(QMainWindow):
         audio_toolbar.addWidget(self.eq_reset_btn)
 
         # Audio Offset
-        offset_label = QLabel(
-            tr("  音声オフセット ", "  Audio Offset ")
+        audio_toolbar.addWidget(
+            label_with_help(
+                "  " + tr("音声オフセット", "Audio Offset"),
+                tr(
+                    "MIDIと音声の時刻のずれ(音ズレ)を秒単位で調整します。\n"
+                    "波形とノーツの位置が合わないときに調整してください。",
+                    "Adjusts the timing gap between the audio and MIDI in seconds.\n"
+                    "Useful when the waveform does not line up with the notes."
+                ),
+                tail=" "
+            )
         )
-        audio_toolbar.addWidget(offset_label)
 
         self.offset_box = QDoubleSpinBox()
         self.offset_box.setRange(-60.0, 60.0)
@@ -1387,10 +1442,18 @@ class MainWindow(QMainWindow):
         audio_toolbar.addWidget(self.mute_audio_button)
 
         # Spectrum Threshold
-        threshold_label = QLabel(
-            tr("  閾値 ", "  Threshold ")
+        audio_toolbar.addWidget(
+            label_with_help(
+                "  " + tr("閾値", "Threshold"),
+                tr(
+                    "スペクトラムを表示する音の強さの下限です。\n"
+                    "大きくするほど弱い音が非表示になり、表示がすっきりします。",
+                    "The level below which weak spectrum parts are hidden.\n"
+                    "Higher values hide more quiet content for a cleaner display."
+                ),
+                tail=" "
+            )
         )
-        audio_toolbar.addWidget(threshold_label)
 
         self.threshold_slider = QSlider(Qt.Horizontal)
         self.threshold_slider.setRange(0, 40)
@@ -1403,10 +1466,18 @@ class MainWindow(QMainWindow):
         audio_toolbar.addWidget(self.threshold_slider)
 
         # Spectrum Sensitivity
-        sensitivity_label = QLabel(
-            tr("  感度 ", "  Sensitivity ")
+        audio_toolbar.addWidget(
+            label_with_help(
+                "  " + tr("感度", "Sensitivity"),
+                tr(
+                    "スペクトラムの見え方の範囲です。\n"
+                    "低いほど強い音だけが鮮明に表示され、高いほど小さい音まで広く表示されます。",
+                    "Controls the display range of the spectrum.\n"
+                    "Lower shows only strong sounds sharply; higher also reveals quiet ones."
+                ),
+                tail=" "
+            )
         )
-        audio_toolbar.addWidget(sensitivity_label)
 
         self.sensitivity_slider = QSlider(Qt.Horizontal)
         self.sensitivity_slider.setRange(10, 100)
@@ -1419,8 +1490,18 @@ class MainWindow(QMainWindow):
         audio_toolbar.addWidget(self.sensitivity_slider)
 
         # Audio File Volume
-        volume_label = QLabel(tr("  音量 ", "  Volume "))
-        audio_toolbar.addWidget(volume_label)
+        audio_toolbar.addWidget(
+            label_with_help(
+                "  " + tr("音量", "Volume"),
+                tr(
+                    "読み込んだ音声ファイルの再生音量です。\n"
+                    "MIDI音源の音量には影響しません。",
+                    "Playback volume of the loaded audio file.\n"
+                    "Does not affect MIDI playback volume."
+                ),
+                tail=" "
+            )
+        )
 
         self.volume_slider = QSlider(Qt.Horizontal)
         self.volume_slider.setRange(0, 50)
@@ -2077,7 +2158,8 @@ class MainWindow(QMainWindow):
             self._analysis_error = None
             self._pending_audio_duration = None
             self._pending_tempo_analysis = None
-
+            self._pending_tap_onsets = None
+    
             self.audio.clear()
             self.audio.offset = project_audio_offset
             self.audio.volume = project_audio_volume
@@ -2101,6 +2183,20 @@ class MainWindow(QMainWindow):
                         self.editor.max_pitch,
                         self.audio.a4_freq
                     )
+                    if token != self._analysis_token:
+                        return
+
+                    try:
+                        from module.taptempo import compute_onset_envelope
+                        onset_times, onset_strengths = compute_onset_envelope(
+                            self.audio.y_mono,
+                            self.audio.sr
+                        )
+                    except Exception:
+                        onset_times, onset_strengths = [], []
+
+                    if token == self._analysis_token:
+                        self._pending_tap_onsets = (onset_times, onset_strengths)
                     if token == self._analysis_token:
                         self._analysis_ready = True
                 except Exception as e:
@@ -2190,25 +2286,6 @@ class MainWindow(QMainWindow):
         self.editor.placement_beats = beats
 
         self.editor.update()
-
-    def trigger_tap_tempo(self):
-        if (
-            not self.editor.tap_mode and
-            self.audio.y is None
-        ):
-            QMessageBox.information(
-                self,
-                tr("テンポを手動計測", "Tap Tempo"),
-                tr(
-                    "音声ファイルが読み込まれていません。\n"
-                    "先にオーディオファイルを開いてください。",
-                    "No audio file is loaded.\n"
-                    "Open an audio file first."
-                )
-            )
-            return
-
-        self.editor.tap_tempo_trigger()
 
     def toggle_lyric_mode(self):
         has_notes = any(
@@ -2395,10 +2472,7 @@ class MainWindow(QMainWindow):
         val, ok = QInputDialog.getDouble(
             self,
             tr("基準周波数の設定", "Reference Pitch"),
-            tr(
-                tr("A=440Hz以外のチューニングを使用する場合は変更してください：", "Change this if the tuning is not A=440Hz:"),
-                "Change this if the tuning is not A=440Hz:"
-            ),
+            tr("A=440Hz以外のチューニングを使用する場合は変更してください：", "Change this if the tuning is not A=440Hz:"),
             440.0,
             400.0,
             500.0,
@@ -2417,7 +2491,8 @@ class MainWindow(QMainWindow):
             self._analysis_error = None
             self._pending_audio_duration = None
             self._pending_tempo_analysis = None
-
+            self._pending_tap_onsets = None
+    
             # A loaded MIDI already supplies the authoritative tempo map.
             analyze_tempo = not self.midi.has_file
 
@@ -2454,6 +2529,20 @@ class MainWindow(QMainWindow):
                         if token == self._analysis_token:
                             self._pending_tempo_analysis = tempo_result
 
+                    if token != self._analysis_token:
+                        return
+
+                    try:
+                        from module.taptempo import compute_onset_envelope
+                        onset_times, onset_strengths = compute_onset_envelope(
+                            self.audio.y_mono,
+                            self.audio.sr
+                        )
+                    except Exception:
+                        onset_times, onset_strengths = [], []
+
+                    if token == self._analysis_token:
+                        self._pending_tap_onsets = (onset_times, onset_strengths)
                     if token == self._analysis_token:
                         self._analysis_ready = True
                 except Exception as e:
@@ -2678,6 +2767,11 @@ class MainWindow(QMainWindow):
             self.editor.set_audio_duration(self._pending_audio_duration)
             self._pending_audio_duration = None
             self.editor.update_timeline()
+
+        if self._pending_tap_onsets is not None:
+            onset_times, onset_strengths = self._pending_tap_onsets
+            self._pending_tap_onsets = None
+            self.editor.set_tap_onsets(onset_times, onset_strengths)
 
         if self._analysis_ready:
             self._analysis_ready = False

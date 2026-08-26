@@ -165,6 +165,13 @@ class PianoRoll(QWidget):
 
         # --- 歌詞入力モード ---
         self.lyric_mode = False
+
+    def set_tap_onsets(self, times, strengths=None):
+        """楽曲全体のオンセット強度をタップテンポエンジンへ登録する。
+
+        WaveTone方式(タップ回帰×音量変化)の周期精密固定に使う。"""
+        self.tap_engine.set_onsets(times, strengths)
+
         self._tap_anim_timer = QTimer(self)
         self._tap_anim_timer.setTimerType(
             Qt.TimerType.PreciseTimer
@@ -937,53 +944,7 @@ class PianoRoll(QWidget):
             event.accept()
             return
 
-        if self.tap_mode:
-            if key == Qt.Key_Space:
-                if not event.isAutoRepeat():
-                    if modifiers & Qt.ShiftModifier:
-                        self._register_tap()
-                    else:
-                        # 計測中のSpaceは再生の停止を意味し、
-                        # 停止処理内で計測結果が確定・反映される
-                        if self.audio.playing:
-                            self.toggle_play()
-                        else:
-                            self.finish_tap_tempo(True)
-
-                event.accept()
-                return
-
-            if key in (
-                Qt.Key_Return,
-                Qt.Key_Enter
-            ) and not event.isAutoRepeat():
-                self.finish_tap_tempo(True)
-                event.accept()
-                return
-
-            if (
-                key == Qt.Key_Escape and
-                not event.isAutoRepeat()
-            ):
-                self.finish_tap_tempo(False)
-                event.accept()
-                return
-
         if key == Qt.Key_Space:
-            if modifiers & Qt.ShiftModifier:
-                # Shift+Space(タップ計測)は再生中のみ受け付ける。
-                # 停止中は何もせず、再生切替も起こさない。
-                if not event.isAutoRepeat():
-                    self.tap_tempo_trigger()
-
-                event.accept()
-                return
-
-            if self.tap_mode:
-                # 計測中の誤って再生を切り替えるのを防ぐ
-                event.accept()
-                return
-
             self.toggle_play()
             event.accept()
             return
