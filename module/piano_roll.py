@@ -7,6 +7,7 @@ from PySide6.QtCore import Qt, QPointF, QRectF, Signal, QTimer
 from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont, QKeySequence, QImage, QPixmap
 from .midi import PedalEvent
 from .taptempo import TapTempoEngine, MIN_TAPS_FOR_APPLY
+from .i18n import tr
 
 class PianoRoll(QWidget):
     marker_edited = Signal()
@@ -37,25 +38,25 @@ class PianoRoll(QWidget):
         self.note_length = 1.0
 
         self.note_lengths = [
-            ("全音符", 4.0),
-            ("付点2分音符", 3.0),
-            ("2分音符", 2.0),
-            ("付点4分音符", 1.5),
-            ("4分音符", 1.0),
-            ("4分3連音符", 2.0 / 3.0),
-            ("付点8分音符", 0.75),
-            ("8分音符", 0.5),
-            ("8分3連音符", 1.0 / 3.0),
-            ("付点16分音符", 0.375),
-            ("16分音符", 0.25),
-            ("16分3連音符", 1.0 / 6.0),
-            ("32分音符", 0.125),
-            ("32分3連音符", 1.0 / 12.0),
-            ("付点64分音符", 0.09375),
-            ("64分音符", 0.0625),
-            ("64分3連音符", 1.0 / 24.0),
-            ("付点128分音符", 0.046875),
-            ("128分音符", 0.03125),
+            (tr("全音符", "Whole note"), 4.0),
+            (tr("付点2分音符", "Dotted half note"), 3.0),
+            (tr("2分音符", "Half note"), 2.0),
+            (tr("付点4分音符", "Dotted quarter note"), 1.5),
+            (tr("4分音符", "Quarter note"), 1.0),
+            (tr("4分3連音符", "Quarter triplet"), 2.0 / 3.0),
+            (tr("付点8分音符", "Dotted eighth note"), 0.75),
+            (tr("8分音符", "Eighth note"), 0.5),
+            (tr("8分3連音符", "Eighth triplet"), 1.0 / 3.0),
+            (tr("付点16分音符", "Dotted sixteenth note"), 0.375),
+            (tr("16分音符", "Sixteenth note"), 0.25),
+            (tr("16分3連音符", "Sixteenth triplet"), 1.0 / 6.0),
+            (tr("32分音符", "Thirty-second note"), 0.125),
+            (tr("32分3連音符", "Thirty-second triplet"), 1.0 / 12.0),
+            (tr("付点64分音符", "Dotted sixty-fourth note"), 0.09375),
+            (tr("64分音符", "Sixty-fourth note"), 0.0625),
+            (tr("64分3連音符", "Sixty-fourth triplet"), 1.0 / 24.0),
+            (tr("付点128分音符", "Dotted 128th note"), 0.046875),
+            (tr("128分音符", "128th note"), 0.03125),
         ]
 
         self.left_width = 76
@@ -895,8 +896,8 @@ class PianoRoll(QWidget):
 
             text, ok = QInputDialog.getText(
                 self,
-                "歌詞の入力",
-                f"歌詞 ({idx + 1}/{len(ordered)}):",
+                tr("歌詞の入力", "Enter Lyrics"),
+                tr(f"歌詞 ({idx + 1}/{len(ordered)}):", f"Lyrics ({idx + 1}/{len(ordered)}):"),
                 text=getattr(target, "lyric", "")
             )
 
@@ -1451,9 +1452,9 @@ class PianoRoll(QWidget):
                 self.update()
 
                 menu = QMenu(self)
-                copy_action = menu.addAction("コピー")
-                cut_action = menu.addAction("切り取り")
-                delete_action = menu.addAction("削除")
+                copy_action = menu.addAction(tr("コピー", "Copy"))
+                cut_action = menu.addAction(tr("切り取り", "Cut"))
+                delete_action = menu.addAction(tr("削除", "Delete"))
 
                 action = menu.exec(event.globalPosition().toPoint())
 
@@ -1481,23 +1482,23 @@ class PianoRoll(QWidget):
 
                 vel_action = None
                 if len(sel_notes) >= 1:
-                    vel_action = menu.addAction("ベロシティを設定")
+                    vel_action = menu.addAction(tr("ベロシティを設定", "Set Velocity"))
 
                 merge_action = None
                 if len(sel_notes) >= 2:
-                    merge_action = menu.addAction("ノーツを結合")
+                    merge_action = menu.addAction(tr("ノーツを結合", "Merge Notes"))
 
                 menu.addSeparator()
-                copy_action = menu.addAction("コピー")
-                cut_action = menu.addAction("切り取り")
-                delete_action = menu.addAction("削除")
+                copy_action = menu.addAction(tr("コピー", "Copy"))
+                cut_action = menu.addAction(tr("切り取り", "Cut"))
+                delete_action = menu.addAction(tr("削除", "Delete"))
 
                 octave_up_action = None
                 octave_down_action = None
                 if len(sel_notes) >= 1:
                     menu.addSeparator()
-                    octave_up_action = menu.addAction("オクターブ上")
-                    octave_down_action = menu.addAction("オクターブ下")
+                    octave_up_action = menu.addAction(tr("オクターブ上", "Octave Up"))
+                    octave_down_action = menu.addAction(tr("オクターブ下", "Octave Down"))
 
                 action = menu.exec(event.globalPosition().toPoint())
 
@@ -1550,23 +1551,23 @@ class PianoRoll(QWidget):
 
                     vel_action = None
                     if len(sel_notes) >= 1:
-                        vel_action = menu.addAction("ベロシティを設定")
+                        vel_action = menu.addAction(tr("ベロシティを設定", "Set Velocity"))
 
                     merge_action = None
                     if len(sel_notes) >= 2:
-                        merge_action = menu.addAction("ノーツを結合")
+                        merge_action = menu.addAction(tr("ノーツを結合", "Merge Notes"))
 
                     menu.addSeparator()
-                    copy_action = menu.addAction("コピー")
-                    cut_action = menu.addAction("切り取り")
-                    delete_action = menu.addAction("削除")
+                    copy_action = menu.addAction(tr("コピー", "Copy"))
+                    cut_action = menu.addAction(tr("切り取り", "Cut"))
+                    delete_action = menu.addAction(tr("削除", "Delete"))
 
                     octave_up_action = None
                     octave_down_action = None
                     if len(sel_notes) >= 1:
                         menu.addSeparator()
-                        octave_up_action = menu.addAction("オクターブ上")
-                        octave_down_action = menu.addAction("オクターブ下")
+                        octave_up_action = menu.addAction(tr("オクターブ上", "Octave Up"))
+                        octave_down_action = menu.addAction(tr("オクターブ下", "Octave Down"))
 
                     action = menu.exec(event.globalPosition().toPoint())
 
@@ -2043,12 +2044,12 @@ class PianoRoll(QWidget):
         t_sec, bpm = marker
 
         dlg = QDialog(self)
-        dlg.setWindowTitle("テンポ変更")
+        dlg.setWindowTitle(tr("テンポ変更", "Edit Tempo"))
 
         layout = QVBoxLayout(dlg)
 
         pos_label = QLabel(
-            f"位置 {t_sec:.2f}s"
+            tr(f"位置 {t_sec:.2f}s", f"Position {t_sec:.2f}s")
         )
         layout.addWidget(pos_label)
 
@@ -2060,13 +2061,13 @@ class PianoRoll(QWidget):
         layout.addWidget(spin)
 
         del_check = QCheckBox(
-            "このテンポを削除"
+            tr("このテンポを削除", "Delete This Tempo")
         )
 
         if len(self.midi.tempos) <= 1:
             del_check.setEnabled(False)
             del_check.setToolTip(
-                "最後のテンポは削除できません"
+                tr("最後のテンポは削除できません", "The last tempo cannot be deleted")
             )
 
         layout.addWidget(del_check)
@@ -2120,12 +2121,12 @@ class PianoRoll(QWidget):
         t_sec, num, den = marker
 
         dlg = QDialog(self)
-        dlg.setWindowTitle("拍子変更")
+        dlg.setWindowTitle(tr("拍子変更", "Edit Time Signature"))
 
         layout = QVBoxLayout(dlg)
 
         pos_label = QLabel(
-            f"位置 {t_sec:.2f}s"
+            tr(f"位置 {t_sec:.2f}s", f"Position {t_sec:.2f}s")
         )
         layout.addWidget(pos_label)
 
@@ -2149,13 +2150,13 @@ class PianoRoll(QWidget):
         layout.addWidget(row)
 
         del_check = QCheckBox(
-            "この拍子を削除"
+            tr("この拍子を削除", "Delete This Time Signature")
         )
 
         if len(self.midi.time_signatures) <= 1:
             del_check.setEnabled(False)
             del_check.setToolTip(
-                "最後の拍子は削除できません"
+                tr("最後の拍子は削除できません", "The last time signature cannot be deleted")
             )
 
         layout.addWidget(del_check)
@@ -3403,14 +3404,14 @@ class PianoRoll(QWidget):
             notes = [note]
 
         dlg = QDialog(self)
-        dlg.setWindowTitle("ベロシティ")
+        dlg.setWindowTitle(tr("ベロシティ", "Velocity"))
 
         layout = QVBoxLayout(dlg)
 
         if len(notes) > 1:
             layout.addWidget(
                 QLabel(
-                    f"選択中の {len(notes)} ノート"
+                    tr(f"選択中の {len(notes)} ノート", f"{len(notes)} notes selected")
                 )
             )
 
@@ -4646,7 +4647,10 @@ class PianoRoll(QWidget):
         fit = self._tap_fit
 
         if fit is None or fit["n"] < 2:
-            text = "拍に合わせて Shift+Space を連打してください（Space: 停止して適用 / Esc: キャンセル）"
+            text = tr(
+                "拍に合わせて Shift+Space を連打してください（Space: 停止して適用 / Esc: キャンセル）",
+                "Tap Shift+Space along the beat (Space: stop and apply / Esc: cancel)"
+            )
 
             fm = painter.fontMetrics()
 
@@ -4695,14 +4699,18 @@ class PianoRoll(QWidget):
         disp_bpm = int(math.floor(self._tap_disp_bpm + 0.5))
 
         if fit["n"] >= MIN_TAPS_FOR_APPLY:
-            text = (
+            text = tr(
                 f"{disp_bpm} BPM   "
-                f"{fit['n']}タップ  ±{rms:.0f}ms"
+                f"{fit['n']}タップ  ±{rms:.0f}ms",
+                f"{disp_bpm} BPM   "
+                f"{fit['n']} taps  ±{rms:.0f}ms"
             )
         else:
-            text = (
+            text = tr(
                 f"{disp_bpm} BPM   "
-                f"{fit['n']}/{MIN_TAPS_FOR_APPLY}タップ"
+                f"{fit['n']}/{MIN_TAPS_FOR_APPLY}タップ",
+                f"{disp_bpm} BPM   "
+                f"{fit['n']}/{MIN_TAPS_FOR_APPLY} taps"
             )
 
         fm = painter.fontMetrics()
@@ -6308,7 +6316,7 @@ class PianoRoll(QWidget):
         painter.drawText(
             6,
             lane_top + 14,
-            "ベロシティ"
+            tr("ベロシティ", "Velocity")
         )
 
         painter.drawText(
@@ -6590,7 +6598,7 @@ class PianoRoll(QWidget):
         painter.drawText(
             6,
             lane_top + 14,
-            "ペダル(CC64)"
+            tr("ペダル(CC64)", "Pedal (CC64)")
         )
 
         self.draw_lane_grid(

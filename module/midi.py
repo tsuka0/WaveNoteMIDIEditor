@@ -6,6 +6,7 @@ import json
 import math
 import uuid as uuidlib
 import mido
+from .i18n import tr
 
 # Synthesizer V Studio の時間単位 blick。
 # 1四分音符 = 705,600,000 blick (公式スクリプトAPIの SV.QUARTER 相当)
@@ -30,7 +31,7 @@ class PedalEvent:
 
 @dataclass
 class Track:
-    name: str = "トラック 1"
+    name: str = field(default_factory=lambda: tr("トラック 1", "Track 1"))
     notes: list = field(default_factory=list)
     pedals: list = field(default_factory=list)
     channel: int = 0
@@ -473,7 +474,7 @@ class MidiData:
 
     def add_track(self, name=None):
         track = Track(
-            name or f"トラック {len(self.tracks) + 1}"
+            name or tr(f"トラック {len(self.tracks) + 1}", f"Track {len(self.tracks) + 1}")
         )
 
         if self.filter_track is None and self.tracks:
@@ -1596,7 +1597,7 @@ class MidiData:
 
         if best is None:
             raise ValueError(
-                "有効なプロジェクトデータ(.svp JSON)が見つかりません"
+                tr("有効なプロジェクトデータ(.svp JSON)が見つかりません", "No valid project data (.svp JSON) found")
             )
 
         return best
@@ -1829,7 +1830,7 @@ class MidiData:
 
                 name = (
                     track_data.get("name") or
-                    f"トラック {len(new_tracks) + 1}"
+                    tr(f"トラック {len(new_tracks) + 1}", f"Track {len(new_tracks) + 1}")
                 )
 
                 new_tracks.append(
@@ -2055,7 +2056,7 @@ class MidiData:
 
                 name = (
                     mtrack.name or
-                    f"トラック {len(new_tracks) + 1}"
+                    tr(f"トラック {len(new_tracks) + 1}", f"Track {len(new_tracks) + 1}")
                 )
 
                 track_channel = (

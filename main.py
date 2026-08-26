@@ -60,6 +60,7 @@ from module.midi import MidiData, Note, PedalEvent
 from module.piano_roll import PianoRoll
 from module.midiout import list_ports
 from module.settings import load_value, save_value, delete_value, load_last_dir, save_last_dir_from_path
+from module.i18n import tr, get_language, set_language, LANGUAGES
 from module.discord_rpc import DiscordRPC
 
 DISCORD_CLIENT_ID = "1539710543751942214"
@@ -96,31 +97,42 @@ def toggle_button_style(checked_color):
 AUDIO_PRESETS_KEY = "audio_presets"
 
 CHANNEL_MODE_LABELS = [
-    "ステレオ",
-    "L+R (モノラル)",
-    "L-R (ボーカルキャンセル)",
-    "Lのみ",
-    "Rのみ"
+    tr("ステレオ", "Stereo"),
+    tr("L+R (モノラル)", "L+R (Mono)"),
+    tr("L-R (ボーカルキャンセル)", "L-R (Vocal Cancel)"),
+    tr("Lのみ", "L only"),
+    tr("Rのみ", "R only")
 ]
 
-DEFAULT_AUDIO_PRESETS = [
-    {"name": "フラット", "channel": 0, "low": 100, "mid": 100, "high": 100},
-    {"name": "メロディを聞きやすく", "channel": 1, "low": 60, "mid": 145, "high": 115},
-    {"name": "ベースを聞きやすく", "channel": 1, "low": 170, "mid": 80, "high": 55},
-    {"name": "リズムを聞きやすく", "channel": 1, "low": 155, "mid": 65, "high": 150},
-    {"name": "ボーカルを消す", "channel": 2, "low": 100, "mid": 100, "high": 100}
-]
+def default_audio_presets():
+    return [
+        {"name": "フラット", "channel": 0, "low": 100, "mid": 100, "high": 100, "builtin": True},
+        {"name": "メロディを聞きやすく", "channel": 1, "low": 60, "mid": 145, "high": 115, "builtin": True},
+        {"name": "ベースを聞きやすく", "channel": 1, "low": 170, "mid": 80, "high": 55, "builtin": True},
+        {"name": "リズムを聞きやすく", "channel": 1, "low": 155, "mid": 65, "high": 150, "builtin": True},
+        {"name": "ボーカルを消す", "channel": 2, "low": 100, "mid": 100, "high": 100, "builtin": True}
+    ]
+
+
+BUILTIN_PRESET_NAME_EN = {
+    "フラット": "Flat",
+    "メロディを聞きやすく": "Bring out melody",
+    "ベースを聞きやすく": "Bring out bass",
+    "リズムを聞きやすく": "Bring out rhythm",
+    "ボーカルを消す": "Remove vocals"
+}
 
 
 def normalize_audio_preset(data):
     preset = {
-        "name": str(data.get("name", "プリセット")),
+        "name": str(data.get("name", tr("プリセット", "Preset"))),
         "channel": int(data.get("channel", 0)),
         "low": int(data.get("low", 100)),
         "mid": int(data.get("mid", 100)),
-        "high": int(data.get("high", 100))
+        "high": int(data.get("high", 100)),
+        "builtin": bool(data.get("builtin", False))
     }
-    preset["name"] = preset["name"] or "プリセット"
+    preset["name"] = preset["name"] or tr("プリセット", "Preset")
     preset["channel"] = max(0, min(len(CHANNEL_MODE_LABELS) - 1, preset["channel"]))
     for key in ("low", "mid", "high"):
         preset[key] = max(0, min(200, preset[key]))
@@ -134,15 +146,27 @@ def load_audio_presets():
         try:
             data = json.loads(str(raw))
             if isinstance(data, list):
-                return [
-                    normalize_audio_preset(item)
-                    for item in data
-                    if isinstance(item, dict)
-                ]
+                presets = []
+
+                for item in data:
+                    if not isinstance(item, dict):
+                        continue
+
+                    preset = normalize_audio_preset(item)
+
+                    if (
+                        "builtin" not in item and
+                        preset["name"] in BUILTIN_PRESET_NAME_EN
+                    ):
+                        preset["builtin"] = True
+
+                    presets.append(preset)
+
+                return presets
         except (ValueError, TypeError):
             pass
 
-    presets = [dict(p) for p in DEFAULT_AUDIO_PRESETS]
+    presets = [dict(p) for p in default_audio_presets()]
     save_value(
         AUDIO_PRESETS_KEY,
         json.dumps(presets, ensure_ascii=False)
@@ -150,26 +174,35 @@ def load_audio_presets():
     return presets
 
 
+def preset_display_name(preset):
+    name = str(preset.get("name", ""))
+
+    if preset.get("builtin") and get_language() == "en":
+        return BUILTIN_PRESET_NAME_EN.get(name, name)
+
+    return name
+
+
 class ShortcutDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("カスタムショートカット")
+        self.setWindowTitle(tr("カスタムショートカット", "Custom Shortcuts"))
         
         self.edits = {}
         form = QFormLayout()
         
         labels = {
-            "action_new_project": "プロジェクトを新規作成",
-            "action_open_project": "プロジェクトを開く",
-            "action_save_project": "プロジェクト保存",
-            "action_save_midi": "MIDI保存",
-            "action_undo": "元に戻す",
-            "action_redo": "やり直し",
-            "action_play": "再生 / 停止",
-            "action_split": "ノーツを分割",
-            "action_select_all": "すべて選択",
-            "action_tap_tempo": "テンポを手動計測(タップ)",
-            "action_lyric_mode": "歌詞入力モード"
+            "action_new_project": tr("プロジェクトを新規作成", "New Project"),
+            "action_open_project": tr("プロジェクトを開く", "Open Project"),
+            "action_save_project": tr("プロジェクト保存", "Save Project"),
+            "action_save_midi": tr("MIDI保存", "Save MIDI"),
+            "action_undo": tr("元に戻す", "Undo"),
+            "action_redo": tr("やり直し", "Redo"),
+            "action_play": tr("再生 / 停止", "Play / Stop"),
+            "action_split": tr("ノーツを分割", "Split Notes"),
+            "action_select_all": tr("すべて選択", "Select All"),
+            "action_tap_tempo": tr("テンポを手動計測(タップ)", "Tap Tempo"),
+            "action_lyric_mode": tr("歌詞入力モード", "Lyric Input Mode")
         }
         
         for key, label in labels.items():
@@ -178,7 +211,7 @@ class ShortcutDialog(QDialog):
             self.edits[key] = edit
             form.addRow(label, edit)
             
-        reset_btn = QPushButton("デフォルトにリセット")
+        reset_btn = QPushButton(tr("デフォルトにリセット", "Reset to Defaults"))
         reset_btn.clicked.connect(self.reset_to_defaults)
         form.addRow("", reset_btn)
             
@@ -207,12 +240,12 @@ class SettingsDialog(QDialog):
     def __init__(self, parent=None, current="internal"):
         super().__init__(parent)
 
-        self.setWindowTitle("設定")
+        self.setWindowTitle(tr("設定", "Settings"))
 
         self._device_combo = QComboBox()
 
         self._device_combo.addItem(
-            "内蔵音源",
+            tr("内蔵音源", "Internal Synth"),
             "internal"
         )
 
@@ -236,30 +269,42 @@ class SettingsDialog(QDialog):
             selected_index
         )
 
-        refresh_button = QPushButton("デバイスを更新")
+        refresh_button = QPushButton(tr("デバイスを更新", "Refresh Devices"))
         refresh_button.clicked.connect(self._refresh_devices)
 
-        self.backup_cb = QCheckBox("定期バックアップを有効にする")
+        self.backup_cb = QCheckBox(tr("定期バックアップを有効にする", "Enable periodic backup"))
         self.backup_cb.setChecked(load_value("auto_backup_enabled", "0") == "1")
 
         self.backup_spin = QSpinBox()
         self.backup_spin.setRange(1, 120)
-        self.backup_spin.setSuffix(" 分")
+        self.backup_spin.setSuffix(tr(" 分", " min"))
         self.backup_spin.setValue(int(load_value("auto_backup_interval", "5")))
 
-        self.discord_cb = QCheckBox("DiscordのRich Presenceを有効にする")
+        self.discord_cb = QCheckBox(tr("DiscordのRich Presenceを有効にする", "Enable Discord Rich Presence"))
         self.discord_cb.setChecked(load_value("discord_rpc_enabled", "1") == "1")
 
-        self.shortcut_btn = QPushButton("カスタムショートカットの設定...")
+        self.shortcut_btn = QPushButton(tr("カスタムショートカットの設定...", "Configure Shortcuts..."))
         self.shortcut_btn.clicked.connect(self.open_shortcuts)
 
+        self.lang_combo = QComboBox()
+
+        for code, label in LANGUAGES:
+            self.lang_combo.addItem(label, code)
+
+        self._initial_language = get_language()
+        lang_index = self.lang_combo.findData(get_language())
+
+        if lang_index >= 0:
+            self.lang_combo.setCurrentIndex(lang_index)
+
         form = QFormLayout()
-        form.addRow("MIDI出力", self._device_combo)
+        form.addRow(tr("言語", "Language"), self.lang_combo)
+        form.addRow(tr("MIDI出力", "MIDI Output"), self._device_combo)
         form.addRow("", refresh_button)
-        form.addRow("バックアップ", self.backup_cb)
-        form.addRow("間隔", self.backup_spin)
+        form.addRow(tr("バックアップ", "Backup"), self.backup_cb)
+        form.addRow(tr("間隔", "Interval"), self.backup_spin)
         form.addRow("Discord", self.discord_cb)
-        form.addRow("ショートカット", self.shortcut_btn)
+        form.addRow(tr("ショートカット", "Shortcuts"), self.shortcut_btn)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.Ok |
@@ -287,10 +332,21 @@ class SettingsDialog(QDialog):
                 main.update_shortcuts()
 
     def accept(self):
+        save_value(
+            "language",
+            self.lang_combo.currentData() or "ja"
+        )
+        set_language(self.lang_combo.currentData() or "ja")
         save_value("auto_backup_enabled", "1" if self.backup_cb.isChecked() else "0")
         save_value("auto_backup_interval", str(self.backup_spin.value()))
         save_value("discord_rpc_enabled", "1" if self.discord_cb.isChecked() else "0")
         super().accept()
+
+    def language_changed(self):
+        return (
+            (self.lang_combo.currentData() or "ja") !=
+            self._initial_language
+        )
 
     def _refresh_devices(self):
         current = self._device_combo.currentData()
@@ -300,7 +356,7 @@ class SettingsDialog(QDialog):
         self._device_combo.clear()
 
         self._device_combo.addItem(
-            "内蔵音源",
+            tr("内蔵音源", "Internal Synth"),
             "internal"
         )
 
@@ -340,7 +396,7 @@ class TrackComboFilter(QObject):
 class AudioPresetDialog(QDialog):
     def __init__(self, parent=None, presets=None):
         super().__init__(parent)
-        self.setWindowTitle("プリセットの管理")
+        self.setWindowTitle(tr("プリセットの管理", "Manage Presets"))
         self.setMinimumWidth(420)
 
         self.presets = [dict(p) for p in (presets or [])]
@@ -354,13 +410,13 @@ class AudioPresetDialog(QDialog):
 
         self.eq_spins = {}
         form = QFormLayout()
-        form.addRow("名前", self.name_edit)
-        form.addRow("チャンネル", self.channel_combo)
+        form.addRow(tr("名前", "Name"), self.name_edit)
+        form.addRow(tr("チャンネル", "Channel"), self.channel_combo)
 
         for key, label in (
-            ("low", "低域"),
-            ("mid", "中域"),
-            ("high", "高域")
+            ("low", tr("低域", "Low")),
+            ("mid", tr("中域", "Mid")),
+            ("high", tr("高域", "High"))
         ):
             spin = QSpinBox(self)
             spin.setRange(0, 200)
@@ -368,9 +424,9 @@ class AudioPresetDialog(QDialog):
             self.eq_spins[key] = spin
             form.addRow(label, spin)
 
-        add_btn = QPushButton("新規作成", self)
+        add_btn = QPushButton(tr("新規作成", "New"), self)
         add_btn.clicked.connect(self.add_preset)
-        delete_btn = QPushButton("削除", self)
+        delete_btn = QPushButton(tr("削除", "Delete"), self)
         delete_btn.clicked.connect(self.delete_preset)
 
         btn_box = QDialogButtonBox(
@@ -402,7 +458,9 @@ class AudioPresetDialog(QDialog):
         )
 
         for index in range(len(self.presets)):
-            self.list_widget.addItem(self.presets[index]["name"])
+            self.list_widget.addItem(
+                preset_display_name(self.presets[index])
+            )
 
         if self.presets:
             self.list_widget.setCurrentRow(0)
@@ -421,13 +479,23 @@ class AudioPresetDialog(QDialog):
             return
         preset = self.presets[row]
         name = self.name_edit.text().strip()
+
         if name:
-            preset["name"] = name
+            if preset.get("builtin"):
+                if (
+                    name != preset["name"] and
+                    name != preset_display_name(preset)
+                ):
+                    preset["builtin"] = False
+                    preset["name"] = name
+            else:
+                preset["name"] = name
+
         preset["channel"] = self.channel_combo.currentIndex()
         for key, spin in self.eq_spins.items():
             preset[key] = spin.value()
 
-        self.list_widget.item(row).setText(preset["name"])
+        self.list_widget.item(row).setText(preset_display_name(preset))
 
     def on_row_changed(self, row):
         self.commit_form()
@@ -439,13 +507,13 @@ class AudioPresetDialog(QDialog):
 
         self.set_form_enabled(True)
         preset = self.presets[row]
-        self.name_edit.setText(preset["name"])
+        self.name_edit.setText(preset_display_name(preset))
         self.channel_combo.setCurrentIndex(preset["channel"])
         for key, spin in self.eq_spins.items():
             spin.setValue(preset[key])
 
     def add_preset(self):
-        name = "新規プリセット"
+        name = tr("新規プリセット", "New Preset")
         names = [p["name"] for p in self.presets]
 
         if name in names:
@@ -462,6 +530,7 @@ class AudioPresetDialog(QDialog):
             "high": 100
         }
         base["name"] = name
+        base["builtin"] = False
 
         self.presets.append(base)
         self.list_widget.addItem(name)
@@ -669,7 +738,10 @@ class MainWindow(QMainWindow):
             self.save_project()
             current_time = time.strftime("%Y/%m/%d %H:%M:%S")
             self.status_backup_label.setText(
-                f"バックアップ保存: {current_time}"
+                tr(
+                    f"バックアップ保存: {current_time}",
+                    f"Backup saved: {current_time}"
+                )
             )
 
     def update_shortcuts(self):
@@ -688,22 +760,27 @@ class MainWindow(QMainWindow):
 
         self.status_position_label = QLabel(" 00:00.0")
         self.status_position_label.setMinimumWidth(80)
-        self.status_position_label.setToolTip("現在の再生位置")
+        self.status_position_label.setToolTip(tr("現在の再生位置", "Current playback position"))
 
-        self.status_notes_label = QLabel("ノーツ 0")
+        self.status_notes_label = QLabel(tr("ノーツ 0", "Notes 0"))
         self.status_notes_label.setMinimumWidth(90)
-        self.status_notes_label.setToolTip("ノーツ数(トラック選択中はそのトラックの数)")
+        self.status_notes_label.setToolTip(
+            tr(
+                "ノーツ数(トラック選択中はそのトラックの数)",
+                "Note count (per-track count when a track is selected)"
+            )
+        )
 
         self.status_bpm_label = QLabel("BPM ---")
         self.status_bpm_label.setMinimumWidth(90)
-        self.status_bpm_label.setToolTip("再生位置のテンポ")
+        self.status_bpm_label.setToolTip(tr("再生位置のテンポ", "Tempo at playback position"))
 
         status.addWidget(self.status_position_label)
         status.addWidget(self.status_notes_label)
         status.addWidget(self.status_bpm_label)
 
         self.status_backup_label = QLabel("")
-        self.status_backup_label.setToolTip("自動バックアップの記録")
+        self.status_backup_label.setToolTip(tr("自動バックアップの記録", "Auto backup history"))
 
         status.addPermanentWidget(self.status_backup_label)
 
@@ -738,7 +815,7 @@ class MainWindow(QMainWindow):
                 for track in self.midi.tracks
             )
 
-        notes_text = f"ノーツ {notes_count}"
+        notes_text = tr(f"ノーツ {notes_count}", f"Notes {notes_count}")
 
         if self.status_notes_label.text() != notes_text:
             self.status_notes_label.setText(notes_text)
@@ -760,8 +837,11 @@ class MainWindow(QMainWindow):
                 if self.project_is_modified():
                     answer = QMessageBox.question(
                         self,
-                        "プロジェクトを保存",
-                        "現在のプロジェクトに未保存の変更があります。保存しますか？",
+                        tr("プロジェクトを保存", "Save Project"),
+                        tr(
+                            "現在のプロジェクトに未保存の変更があります。保存しますか？",
+                            "The current project has unsaved changes. Save them?"
+                        ),
                         QMessageBox.Yes |
                         QMessageBox.No |
                         QMessageBox.Cancel,
@@ -781,8 +861,8 @@ class MainWindow(QMainWindow):
         if not os.path.exists(path):
             QMessageBox.critical(
                 self,
-                "エラー",
-                f"ファイルが見つかりません:\n{path}"
+                tr("エラー", "Error"),
+                tr(f"ファイルが見つかりません:\n{path}", f"File not found:\n{path}")
             )
             return
 
@@ -803,16 +883,22 @@ class MainWindow(QMainWindow):
                 pass
             QMessageBox.warning(
                 self,
-                "未対応の形式",
-                f"サポートされていないファイル形式です:\n{path}"
+                tr("未対応の形式", "Unsupported Format"),
+                tr(
+                    f"サポートされていないファイル形式です:\n{path}",
+                    f"Unsupported file format:\n{path}"
+                )
             )
 
     def closeEvent(self, event):
         if self.project_is_modified():
             answer = QMessageBox.question(
                 self,
-                "プロジェクトを保存",
-                "プロジェクトに未保存の変更があります。保存しますか？",
+                tr("プロジェクトを保存", "Save Project"),
+                tr(
+                    "プロジェクトに未保存の変更があります。保存しますか？",
+                    "The project has unsaved changes. Save them?"
+                ),
                 QMessageBox.Yes |
                 QMessageBox.No |
                 QMessageBox.Cancel,
@@ -835,34 +921,34 @@ class MainWindow(QMainWindow):
 
     def create_menu(self):
         file_menu = self.menuBar().addMenu(
-            "ファイル"
+            tr("ファイル", "File")
         )
 
-        new_project_action = QAction("プロジェクトを新規作成", self)
+        new_project_action = QAction(tr("プロジェクトを新規作成", "New Project"), self)
         new_project_action.setShortcut(QKeySequence.StandardKey.New)
         new_project_action.triggered.connect(self.new_project)
 
-        load_project_action = QAction("プロジェクトを開く", self)
+        load_project_action = QAction(tr("プロジェクトを開く", "Open Project"), self)
         load_project_action.setShortcut(QKeySequence.StandardKey.Open)
         load_project_action.triggered.connect(self.open_project)
 
-        save_project_action = QAction("プロジェクトを保存", self)
+        save_project_action = QAction(tr("プロジェクトを保存", "Save Project"), self)
         save_project_action.setShortcut(QKeySequence.StandardKey.Save)
         save_project_action.triggered.connect(self.save_project)
 
-        open_midi_action = QAction("MIDI / SVPを開く", self)
+        open_midi_action = QAction(tr("MIDI / SVPを開く", "Open MIDI / SVP"), self)
         open_midi_action.triggered.connect(self.open_midi)
 
-        open_audio_action = QAction("オーディオを開く", self)
+        open_audio_action = QAction(tr("オーディオを開く", "Open Audio"), self)
         open_audio_action.triggered.connect(self.open_audio)
 
-        save_action = QAction("MIDI上書き保存", self)
+        save_action = QAction(tr("MIDI上書き保存", "Overwrite-save MIDI"), self)
         save_action.triggered.connect(self.save_midi)
         
-        save_as_action = QAction("MIDI名前を付けて保存", self)
+        save_as_action = QAction(tr("MIDI名前を付けて保存", "Save MIDI As..."), self)
         save_as_action.triggered.connect(self.save_midi_as)
 
-        exit_action = QAction("終了", self)
+        exit_action = QAction(tr("終了", "Exit"), self)
         exit_action.triggered.connect(self.close)
 
         file_menu.addAction(new_project_action)
@@ -875,11 +961,11 @@ class MainWindow(QMainWindow):
         file_menu.addAction(exit_action)
 
         edit_menu = self.menuBar().addMenu(
-            "編集"
+            tr("編集", "Edit")
         )
 
         undo_action = QAction(
-            "元に戻す",
+            tr("元に戻す", "Undo"),
             self
         )
         undo_action.setShortcut(
@@ -893,7 +979,7 @@ class MainWindow(QMainWindow):
         )
 
         redo_action = QAction(
-            "やり直し",
+            tr("やり直し", "Redo"),
             self
         )
         redo_action.setShortcut(
@@ -907,11 +993,11 @@ class MainWindow(QMainWindow):
         )
 
         playback_menu = self.menuBar().addMenu(
-            "再生"
+            tr("再生", "Playback")
         )
 
         play_action = QAction(
-            "再生 / 停止",
+            tr("再生 / 停止", "Play / Stop"),
             self
         )
         play_action.setShortcut(
@@ -927,7 +1013,7 @@ class MainWindow(QMainWindow):
         )
 
         split_action = QAction(
-            "分割",
+            tr("分割", "Split"),
             self
         )
         split_action.triggered.connect(
@@ -945,7 +1031,7 @@ class MainWindow(QMainWindow):
         self.actions["action_split"] = split_action
 
         select_all_action = QAction(
-            "すべて選択",
+            tr("すべて選択", "Select All"),
             self
         )
         select_all_action.triggered.connect(
@@ -955,13 +1041,17 @@ class MainWindow(QMainWindow):
         self.actions["action_select_all"] = select_all_action
 
         lyric_mode_action = QAction(
-            "歌詞入力モード",
+            tr("歌詞入力モード", "Lyric Input Mode"),
             self
         )
         lyric_mode_action.setCheckable(True)
         lyric_mode_action.setToolTip(
-            "ノーツをクリックして歌詞を入力します。"
-            "右ドラッグやCtrl+Aで選択したノーツには時系列順に連続入力できます(L)"
+            tr(
+                "ノーツをクリックして歌詞を入力します。"
+                "右ドラッグやCtrl+Aで選択したノーツには時系列順に連続入力できます(L)",
+                "Click notes to enter lyrics. "
+                "Notes selected via right-drag or Ctrl+A can be filled in order (L)"
+            )
         )
         lyric_mode_action.triggered.connect(
             self.toggle_lyric_mode
@@ -970,7 +1060,7 @@ class MainWindow(QMainWindow):
         self.actions["action_lyric_mode"] = lyric_mode_action
 
         stop_action = QAction(
-            "停止",
+            tr("停止", "Stop"),
             self
         )
         stop_action.triggered.connect(
@@ -981,7 +1071,7 @@ class MainWindow(QMainWindow):
         )
 
         tap_tempo_action = QAction(
-            "テンポを手動計測(タップ)",
+            tr("テンポを手動計測(タップ)", "Tap Tempo"),
             self
         )
         tap_tempo_action.setToolTip(
@@ -997,11 +1087,11 @@ class MainWindow(QMainWindow):
         self.actions["action_tap_tempo"] = tap_tempo_action
 
         settings_menu = self.menuBar().addMenu(
-            "設定"
+            tr("設定", "Settings")
         )
 
         settings_action = QAction(
-            "設定...",
+            tr("設定...", "Settings..."),
             self
         )
         settings_action.triggered.connect(
@@ -1020,7 +1110,7 @@ class MainWindow(QMainWindow):
         toolbar.setContextMenuPolicy(Qt.PreventContextMenu)
 
         track_label = QLabel(
-            "  トラック "
+            tr("  トラック ", "  Track ")
         )
 
         toolbar.addWidget(
@@ -1049,7 +1139,7 @@ class MainWindow(QMainWindow):
             28
         )
         add_track_button.setToolTip(
-            "トラックを追加"
+            tr("トラックを追加", "Add Track")
         )
         add_track_button.clicked.connect(
             self.add_track
@@ -1066,10 +1156,10 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(spacer2)
 
         insert_tempo_button = QPushButton(
-            "テンポ追加"
+            tr("テンポ追加", "Add Tempo")
         )
         insert_tempo_button.setToolTip(
-            "再生位置にテンポを挿入"
+            tr("再生位置にテンポを挿入", "Insert a tempo at the play position")
         )
         insert_tempo_button.clicked.connect(
             self.insert_tempo
@@ -1079,10 +1169,10 @@ class MainWindow(QMainWindow):
         )
 
         insert_timesig_button = QPushButton(
-            "拍子追加"
+            tr("拍子追加", "Add Time Signature")
         )
         insert_timesig_button.setToolTip(
-            "再生位置に拍子を挿入"
+            tr("再生位置に拍子を挿入", "Insert a time signature at the play position")
         )
         insert_timesig_button.clicked.connect(
             self.insert_timesig
@@ -1091,7 +1181,7 @@ class MainWindow(QMainWindow):
             insert_timesig_button
         )
         length_label = QLabel(
-            "  ノート長 "
+            tr("  ノート長 ", "  Note Length ")
         )
 
         toolbar.addWidget(
@@ -1125,7 +1215,7 @@ class MainWindow(QMainWindow):
         )
 
         self.return_to_start_checkbox = QCheckBox(
-            "停止時に開始位置へ戻る"
+            tr("停止時に開始位置へ戻る", "Return to start position on stop")
         )
         self.return_to_start_checkbox.setStyleSheet(
             "QCheckBox { margin-left: 8px; }"
@@ -1142,14 +1232,14 @@ class MainWindow(QMainWindow):
         )
 
         self.mute_midi_button = QPushButton(
-            "MIDIをミュート"
+            tr("MIDIをミュート", "Mute MIDI")
         )
         self.mute_midi_button.setCheckable(True)
         self.mute_midi_button.setStyleSheet(
             toggle_button_style("#c0392b")
         )
         self.mute_midi_button.setToolTip(
-            "再生時にMIDI音を鳴らさず、波形(オーディオ)のみ再生します"
+            tr("再生時にMIDI音を鳴らさず、波形(オーディオ)のみ再生します", "Play only the waveform (audio) without MIDI sounds during playback")
         )
         self.mute_midi_button.setChecked(
             self.audio.midi_muted
@@ -1163,14 +1253,14 @@ class MainWindow(QMainWindow):
         )
 
         self.play_all_tracks_button = QPushButton(
-            "MIDI全体を再生"
+            tr("MIDI全体を再生", "Play All MIDI Tracks")
         )
         self.play_all_tracks_button.setCheckable(True)
         self.play_all_tracks_button.setStyleSheet(
             toggle_button_style("#2e7d32")
         )
         self.play_all_tracks_button.setToolTip(
-            "単一トラック選択中でも、全トラックのMIDIを鳴らして再生します"
+            tr("単一トラック選択中でも、全トラックのMIDIを鳴らして再生します", "Play MIDI from all tracks even when a single track is selected")
         )
         self.play_all_tracks_button.setChecked(
             self.midi.play_all_tracks
@@ -1190,16 +1280,21 @@ class MainWindow(QMainWindow):
         audio_toolbar.setContextMenuPolicy(Qt.PreventContextMenu)
 
         # Audio Presets
-        preset_label = QLabel("  プリセット: ")
+        preset_label = QLabel(tr("  プリセット: ", "  Preset: "))
         audio_toolbar.addWidget(preset_label)
 
         self.preset_combo = QComboBox()
         self.preset_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         self.preset_combo.setMaximumWidth(160)
         self.preset_combo.setToolTip(
-            "チャンネルとEQの組み合わせプリセット。\n"
-            "「現在の設定をプリセット保存...」で追加、"
-            "「プリセットの管理...」で編集・削除できます"
+            tr(
+                "チャンネルとEQの組み合わせプリセット。\n"
+                "「現在の設定をプリセット保存...」で追加、"
+                "「プリセットの管理...」で編集・削除できます",
+                "Presets combining channel mode and EQ.\n"
+                "Use \"Save Current Settings as Preset...\" to add, and\n"
+                "\"Manage Presets...\" to edit or remove them"
+            )
         )
         self.preset_combo.currentIndexChanged.connect(
             self.change_audio_preset
@@ -1208,7 +1303,7 @@ class MainWindow(QMainWindow):
         self.rebuild_preset_combo()
 
         # Channel Mode
-        channel_label = QLabel("  解析/音声: ")
+        channel_label = QLabel(tr("  解析/音声: ", "  Analysis/Audio: "))
         audio_toolbar.addWidget(channel_label)
         self.channel_combo = QComboBox()
         self.channel_combo.addItems(CHANNEL_MODE_LABELS)
@@ -1220,7 +1315,7 @@ class MainWindow(QMainWindow):
         audio_toolbar.addWidget(eq_label)
         
         # Low EQ
-        self.eq_low_label = QLabel(" 低域")
+        self.eq_low_label = QLabel(tr(" 低域", " Low"))
         audio_toolbar.addWidget(self.eq_low_label)
         self.eq_low_slider = QSlider(Qt.Horizontal)
         self.eq_low_slider.setRange(0, 200) # 0.0x to 2.0x
@@ -1232,7 +1327,7 @@ class MainWindow(QMainWindow):
         audio_toolbar.addWidget(self.eq_low_slider)
         
         # Mid EQ
-        self.eq_mid_label = QLabel(" 中域")
+        self.eq_mid_label = QLabel(tr(" 中域", " Mid"))
         audio_toolbar.addWidget(self.eq_mid_label)
         self.eq_mid_slider = QSlider(Qt.Horizontal)
         self.eq_mid_slider.setRange(0, 200)
@@ -1244,7 +1339,7 @@ class MainWindow(QMainWindow):
         audio_toolbar.addWidget(self.eq_mid_slider)
         
         # High EQ
-        self.eq_high_label = QLabel(" 高域")
+        self.eq_high_label = QLabel(tr(" 高域", " High"))
         audio_toolbar.addWidget(self.eq_high_label)
         self.eq_high_slider = QSlider(Qt.Horizontal)
         self.eq_high_slider.setRange(0, 200)
@@ -1256,14 +1351,14 @@ class MainWindow(QMainWindow):
         audio_toolbar.addWidget(self.eq_high_slider)
 
         # EQ Reset Button
-        self.eq_reset_btn = QPushButton("リセット")
-        self.eq_reset_btn.setToolTip("EQをフラット(初期値)に戻します")
+        self.eq_reset_btn = QPushButton(tr("リセット", "Reset"))
+        self.eq_reset_btn.setToolTip(tr("EQをフラット(初期値)に戻します", "Reset EQ to flat (default)"))
         self.eq_reset_btn.clicked.connect(self.reset_eq)
         audio_toolbar.addWidget(self.eq_reset_btn)
 
         # Audio Offset
         offset_label = QLabel(
-            "  音声オフセット "
+            tr("  音声オフセット ", "  Audio Offset ")
         )
         audio_toolbar.addWidget(offset_label)
 
@@ -1276,13 +1371,13 @@ class MainWindow(QMainWindow):
         audio_toolbar.addWidget(self.offset_box)
 
         # Audio Mute
-        self.mute_audio_button = QPushButton("音声ミュート")
+        self.mute_audio_button = QPushButton(tr("音声ミュート", "Mute Audio"))
         self.mute_audio_button.setCheckable(True)
         self.mute_audio_button.setStyleSheet(
             toggle_button_style("#c0392b")
         )
         self.mute_audio_button.setToolTip(
-            "音声ファイルの再生をミュートします(MIDI音源は鳴り続けます)"
+            tr("音声ファイルの再生をミュートします(MIDI音源は鳴り続けます)", "Mutes audio file playback (MIDI keeps playing)")
         )
         self.mute_audio_button.setChecked(
             str(load_value("mute_audio", "0")).lower() in ("1", "true", "yes", "on")
@@ -1293,7 +1388,7 @@ class MainWindow(QMainWindow):
 
         # Spectrum Threshold
         threshold_label = QLabel(
-            "  閾値 "
+            tr("  閾値 ", "  Threshold ")
         )
         audio_toolbar.addWidget(threshold_label)
 
@@ -1303,13 +1398,13 @@ class MainWindow(QMainWindow):
         self.threshold_slider.setMaximumWidth(110)
         self.threshold_slider.setMinimumWidth(50)
         self.threshold_slider.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
-        self.threshold_slider.setToolTip("スペクトラムの弱い部分を非表示にする閾値")
+        self.threshold_slider.setToolTip(tr("スペクトラムの弱い部分を非表示にする閾値", "Threshold that hides weak spectrum parts"))
         self.threshold_slider.valueChanged.connect(self.change_threshold)
         audio_toolbar.addWidget(self.threshold_slider)
 
         # Spectrum Sensitivity
         sensitivity_label = QLabel(
-            "  感度 "
+            tr("  感度 ", "  Sensitivity ")
         )
         audio_toolbar.addWidget(sensitivity_label)
 
@@ -1319,12 +1414,12 @@ class MainWindow(QMainWindow):
         self.sensitivity_slider.setMaximumWidth(110)
         self.sensitivity_slider.setMinimumWidth(50)
         self.sensitivity_slider.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
-        self.sensitivity_slider.setToolTip("スペクトラム感度：低いほど鮮明、高いほど広範囲表示")
+        self.sensitivity_slider.setToolTip(tr("スペクトラム感度：低いほど鮮明、高いほど広範囲表示", "Spectrum sensitivity: lower is sharper, higher shows a wider range"))
         self.sensitivity_slider.valueChanged.connect(self.change_sensitivity)
         audio_toolbar.addWidget(self.sensitivity_slider)
 
         # Audio File Volume
-        volume_label = QLabel("  音量 ")
+        volume_label = QLabel(tr("  音量 ", "  Volume "))
         audio_toolbar.addWidget(volume_label)
 
         self.volume_slider = QSlider(Qt.Horizontal)
@@ -1333,7 +1428,7 @@ class MainWindow(QMainWindow):
         self.volume_slider.setMaximumWidth(110)
         self.volume_slider.setMinimumWidth(50)
         self.volume_slider.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
-        self.volume_slider.setToolTip("音声ファイルの音量")
+        self.volume_slider.setToolTip(tr("音声ファイルの音量", "Audio file volume"))
         self.volume_slider.valueChanged.connect(self.change_volume)
         audio_toolbar.addWidget(self.volume_slider)
 
@@ -1361,8 +1456,11 @@ class MainWindow(QMainWindow):
         ):
             QMessageBox.warning(
                 self,
-                "設定",
-                "選択したデバイスを開けませんでした。\n内蔵音源に戻しました。"
+                tr("設定", "Settings"),
+                tr(
+                    "選択したデバイスを開けませんでした。\n内蔵音源に戻しました。",
+                    "Could not open the selected device.\nReverted to the internal synth."
+                )
             )
 
         save_value(
@@ -1370,6 +1468,16 @@ class MainWindow(QMainWindow):
             self.audio.output_device
         )
         self.update_auto_backup_timer()
+
+        if dialog.language_changed():
+            QMessageBox.information(
+                self,
+                tr("言語", "Language"),
+                tr(
+                    "言語の変更は再起動後に完全に適用されます。",
+                    "The language change will be fully applied after a restart."
+                )
+            )
 
         self.update_discord_rpc()
 
@@ -1379,7 +1487,7 @@ class MainWindow(QMainWindow):
         self.track_combo.clear()
 
         self.track_combo.addItem(
-            "すべてのトラック",
+            tr("すべてのトラック", "All Tracks"),
             None
         )
 
@@ -1436,8 +1544,8 @@ class MainWindow(QMainWindow):
         track = self.midi.tracks[index]
         new_name, ok = QInputDialog.getText(
             self,
-            "トラック名の変更",
-            "新しいトラック名:",
+            tr("トラック名の変更", "Rename Track"),
+            tr("新しいトラック名:", "New track name:"),
             text=track.name
         )
 
@@ -1542,15 +1650,15 @@ class MainWindow(QMainWindow):
     def rebuild_preset_combo(self):
         self.preset_combo.blockSignals(True)
         self.preset_combo.clear()
-        self.preset_combo.addItem("カスタム")
+        self.preset_combo.addItem(tr("カスタム", "Custom"))
 
         for preset in self.audio_presets:
-            self.preset_combo.addItem(preset["name"], preset)
+            self.preset_combo.addItem(preset_display_name(preset), preset)
 
         if self.audio_presets:
             self.preset_combo.insertSeparator(self.preset_combo.count())
-        self.preset_combo.addItem("現在の設定をプリセット保存...", "__save__")
-        self.preset_combo.addItem("プリセットの管理...", "__manage__")
+        self.preset_combo.addItem(tr("現在の設定をプリセット保存...", "Save Current Settings as Preset..."), "__save__")
+        self.preset_combo.addItem(tr("プリセットの管理...", "Manage Presets..."), "__manage__")
         self.preset_combo.blockSignals(False)
 
     def sync_preset_combo(self):
@@ -1601,11 +1709,14 @@ class MainWindow(QMainWindow):
     def save_current_as_preset(self):
         state = self.current_audio_state()
 
-        default_name = f"プリセット{len(self.audio_presets) + 1}"
+        default_name = tr(
+            f"プリセット{len(self.audio_presets) + 1}",
+            f"Preset {len(self.audio_presets) + 1}"
+        )
         name, ok = QInputDialog.getText(
             self,
-            "プリセット保存",
-            "プリセット名:",
+            tr("プリセット保存", "Save Preset"),
+            tr("プリセット名:", "Preset name:"),
             text=default_name
         )
 
@@ -1772,8 +1883,11 @@ class MainWindow(QMainWindow):
         if self.project_is_modified():
             answer = QMessageBox.question(
                 self,
-                "未保存の変更",
-                "現在のプロジェクトに変更があります。\n保存しますか？",
+                tr("未保存の変更", "Unsaved Changes"),
+                tr(
+                    "現在のプロジェクトに変更があります。\n保存しますか？",
+                    "The current project has been modified.\nSave changes?"
+                ),
                 QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel
             )
 
@@ -1807,7 +1921,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(
                 self,
-                "エラー",
+                tr("エラー", "Error"),
                 str(e)
             )
             return False
@@ -1843,8 +1957,11 @@ class MainWindow(QMainWindow):
         if not os.path.exists(path):
             QMessageBox.critical(
                 self,
-                "エラー",
-                f"プロジェクトファイルが見つかりません:\n{path}"
+                tr("エラー", "Error"),
+                tr(
+                    f"プロジェクトファイルが見つかりません:\n{path}",
+                    f"Project file not found:\n{path}"
+                )
             )
             return
 
@@ -1855,8 +1972,11 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(
                 self,
-                "エラー",
-                f"プロジェクトの読み込みに失敗しました:\n{e}"
+                tr("エラー", "Error"),
+                tr(
+                    f"プロジェクトの読み込みに失敗しました:\n{e}",
+                    f"Failed to load project:\n{e}"
+                )
             )
             return
 
@@ -1988,8 +2108,11 @@ class MainWindow(QMainWindow):
                         self._analysis_error = e
                         self._analysis_ready = True
 
-            progress = QProgressDialog("オーディオとスペクトラムを解析中...", "キャンセル", 0, 0, self)
-            progress.setWindowTitle("プロジェクトを開く")
+            progress = QProgressDialog(
+                tr("オーディオとスペクトラムを解析中...", "Analyzing audio and spectrum..."),
+                tr("キャンセル", "Cancel"), 0, 0, self
+            )
+            progress.setWindowTitle(tr("プロジェクトを開く", "Open Project"))
             progress.setWindowModality(Qt.WindowModal)
             progress.setCancelButton(None)
             progress.show()
@@ -2013,8 +2136,11 @@ class MainWindow(QMainWindow):
             if audio_file:
                 QMessageBox.warning(
                     self,
-                    "音声ファイルが見つかりません",
-                    f"プロジェクトに登録されている音声ファイルが見つかりませんでした:\n{audio_file}"
+                    tr("音声ファイルが見つかりません", "Audio File Not Found"),
+                    tr(
+                        f"プロジェクトに登録されている音声ファイルが見つかりませんでした:\n{audio_file}",
+                        f"The audio file registered in the project was not found:\n{audio_file}"
+                    )
                 )
 
         self.refresh_track_combo()
@@ -2072,9 +2198,13 @@ class MainWindow(QMainWindow):
         ):
             QMessageBox.information(
                 self,
-                "テンポを手動計測",
-                "音声ファイルが読み込まれていません。\n"
-                "先にオーディオファイルを開いてください。"
+                tr("テンポを手動計測", "Tap Tempo"),
+                tr(
+                    "音声ファイルが読み込まれていません。\n"
+                    "先にオーディオファイルを開いてください。",
+                    "No audio file is loaded.\n"
+                    "Open an audio file first."
+                )
             )
             return
 
@@ -2089,9 +2219,13 @@ class MainWindow(QMainWindow):
         if not self.editor.lyric_mode and not has_notes:
             QMessageBox.information(
                 self,
-                "歌詞入力モード",
-                "ノーツがありません。\n"
-                "先にノーツを追加してください。"
+                tr("歌詞入力モード", "Lyric Input Mode"),
+                tr(
+                    "ノーツがありません。\n"
+                    "先にノーツを追加してください。",
+                    "There are no notes.\n"
+                    "Add notes first."
+                )
             )
             action = self.actions.get("action_lyric_mode")
             if action is not None:
@@ -2106,14 +2240,19 @@ class MainWindow(QMainWindow):
 
         if enabled:
             self.statusBar().showMessage(
-                "歌詞入力モード: ノーツをクリックして歌詞を入力"
-                "(選択中のノーツは時系列順に連続入力 / "
-                "右ドラッグで範囲選択 / Escで終了)",
+                tr(
+                    "歌詞入力モード: ノーツをクリックして歌詞を入力"
+                    "(選択中のノーツは時系列順に連続入力 / "
+                    "右ドラッグで範囲選択 / Escで終了)",
+                    "Lyric input mode: click notes to enter lyrics"
+                    "(selected notes are filled in chronological order / "
+                    "right-drag to select a range / Esc to exit)"
+                ),
                 8000
             )
         else:
             self.statusBar().showMessage(
-                "歌詞入力モードを終了しました",
+                tr("歌詞入力モードを終了しました", "Lyric input mode exited"),
                 3000
             )
 
@@ -2127,8 +2266,12 @@ class MainWindow(QMainWindow):
         self.editor.bpm = self.midi.bpm
         self.after_edit()
         self.statusBar().showMessage(
-            f"計測したテンポを適用しました: {bpm:.2f} BPM "
-            f"(開始位置 {max(0.0, float(start_time)):.2f}s)",
+            tr(
+                f"計測したテンポを適用しました: {bpm:.2f} BPM "
+                f"(開始位置 {max(0.0, float(start_time)):.2f}s)",
+                f"Applied measured tempo: {bpm:.2f} BPM "
+                f"(start at {max(0.0, float(start_time)):.2f}s)"
+            ),
             5000
         )
 
@@ -2136,11 +2279,11 @@ class MainWindow(QMainWindow):
         current_tempo = self.midi.tempo_at(self.editor.play_position)
         
         dialog = QDialog(self)
-        dialog.setWindowTitle("テンポの追加")
+        dialog.setWindowTitle(tr("テンポの追加", "Add Tempo"))
         layout = QVBoxLayout(dialog)
         
         hlayout = QHBoxLayout()
-        hlayout.addWidget(QLabel("新しいテンポ (BPM):"))
+        hlayout.addWidget(QLabel(tr("新しいテンポ (BPM):", "New tempo (BPM):")))
         tempo_spin = QDoubleSpinBox()
         tempo_spin.setRange(20.0, 999.0)
         tempo_spin.setDecimals(1)
@@ -2181,7 +2324,7 @@ class MainWindow(QMainWindow):
     def insert_timesig(self):
         current_num, current_den = self.midi.time_sig_at(self.editor.play_position)
         dialog = QDialog(self)
-        dialog.setWindowTitle("拍子の追加")
+        dialog.setWindowTitle(tr("拍子の追加", "Add Time Signature"))
         layout = QVBoxLayout(dialog)
         
         hlayout = QHBoxLayout()
@@ -2229,7 +2372,7 @@ class MainWindow(QMainWindow):
     def open_audio(self):
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "オーディオを開く",
+            tr("オーディオを開く", "Open Audio"),
             load_last_dir(),
             "Audio Files (*.wav *.mp3 *.flac *.ogg *.m4a);;All Files (*)"
         )
@@ -2242,8 +2385,8 @@ class MainWindow(QMainWindow):
         if not os.path.exists(path):
             QMessageBox.critical(
                 self,
-                "エラー",
-                f"音声ファイルが見つかりません:\n{path}"
+                tr("エラー", "Error"),
+                tr(f"音声ファイルが見つかりません:\n{path}", f"Audio file not found:\n{path}")
             )
             return
 
@@ -2251,8 +2394,11 @@ class MainWindow(QMainWindow):
 
         val, ok = QInputDialog.getDouble(
             self,
-            "基準周波数の設定",
-            "A=440Hz以外のチューニングを使用する場合は変更してください：",
+            tr("基準周波数の設定", "Reference Pitch"),
+            tr(
+                tr("A=440Hz以外のチューニングを使用する場合は変更してください：", "Change this if the tuning is not A=440Hz:"),
+                "Change this if the tuning is not A=440Hz:"
+            ),
             440.0,
             400.0,
             500.0,
@@ -2315,8 +2461,11 @@ class MainWindow(QMainWindow):
                         self._analysis_error = e
                         self._analysis_ready = True
 
-            progress = QProgressDialog("オーディオとスペクトラムを解析中...", "キャンセル", 0, 0, self)
-            progress.setWindowTitle("オーディオを開く")
+            progress = QProgressDialog(
+                tr("オーディオとスペクトラムを解析中...", "Analyzing audio and spectrum..."),
+                tr("キャンセル", "Cancel"), 0, 0, self
+            )
+            progress.setWindowTitle(tr("オーディオを開く", "Open Audio"))
             progress.setWindowModality(Qt.WindowModal)
             progress.setCancelButton(None)
             progress.show()
@@ -2342,7 +2491,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(
                 self,
-                "エラー",
+                tr("エラー", "Error"),
                 str(e)
             )
 
@@ -2351,7 +2500,7 @@ class MainWindow(QMainWindow):
     def open_project(self):
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "プロジェクトを開く",
+            tr("プロジェクトを開く", "Open Project"),
             load_last_dir(),
             "WaveNote Project (*.wnp);;All Files (*)"
         )
@@ -2362,7 +2511,7 @@ class MainWindow(QMainWindow):
     def open_midi(self):
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "MIDI / SVPを開く",
+            tr("MIDI / SVPを開く", "Open MIDI / SVP"),
             load_last_dir(),
             "MIDI / Synthesizer V Project (*.mid *.midi *.svp);;MIDI Files (*.mid *.midi);;Synthesizer V Project (*.svp)"
         )
@@ -2375,8 +2524,8 @@ class MainWindow(QMainWindow):
         if not os.path.exists(path):
             QMessageBox.critical(
                 self,
-                "エラー",
-                f"ファイルが見つかりません:\n{path}"
+                tr("エラー", "Error"),
+                tr(f"ファイルが見つかりません:\n{path}", f"File not found:\n{path}")
             )
             return
 
@@ -2414,7 +2563,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(
                 self,
-                "エラー",
+                tr("エラー", "Error"),
                 str(e)
             )
 
@@ -2423,15 +2572,26 @@ class MainWindow(QMainWindow):
             try:
                 if self._last_midi_is_svp:
                     self.midi.save_svp(self._last_midi_path)
-                    QMessageBox.information(self, "完了", "SVPファイルを上書き保存しました。")
+                    QMessageBox.information(
+                        self,
+                        tr("完了", "Done"),
+                        tr("SVPファイルを上書き保存しました。", "SVP file saved (overwrite).")
+                    )
                 else:
                     self.midi.save(self._last_midi_path)
-                    QMessageBox.information(self, "完了", "MIDIファイルを上書き保存しました。")
+                    QMessageBox.information(
+                        self,
+                        tr("完了", "Done"),
+                        tr("MIDIファイルを上書き保存しました。", "MIDI file saved (overwrite).")
+                    )
             except Exception as e:
                 QMessageBox.critical(
                     self,
-                    "エラー",
-                    f"保存中にエラーが発生しました:\n{e}"
+                    tr("エラー", "Error"),
+                    tr(
+                        f"保存中にエラーが発生しました:\n{e}",
+                        f"An error occurred while saving:\n{e}"
+                    )
                 )
         else:
             self.save_midi_as()
@@ -2439,7 +2599,7 @@ class MainWindow(QMainWindow):
     def save_midi_as(self):
         path, selected_filter = QFileDialog.getSaveFileName(
             self,
-            "書き出しを保存",
+            tr("書き出しを保存", "Export As"),
             load_last_dir(),
             "MIDI Files (*.mid *.midi);;WAV Files (*.wav);;Synthesizer V Project (*.svp)"
         )
@@ -2455,8 +2615,11 @@ class MainWindow(QMainWindow):
                     path += ".wav"
                     
                 # プログレスダイアログを表示してWAVエクスポート
-                progress = QProgressDialog("WAVファイルを出力中...", "キャンセル", 0, 0, self)
-                progress.setWindowTitle("書き出し")
+                progress = QProgressDialog(
+                    tr("WAVファイルを出力中...", "Exporting WAV file..."),
+                    tr("キャンセル", "Cancel"), 0, 0, self
+                )
+                progress.setWindowTitle(tr("書き出し", "Export"))
                 progress.setWindowModality(Qt.WindowModal)
                 progress.setCancelButton(None)
                 progress.show()
@@ -2465,7 +2628,11 @@ class MainWindow(QMainWindow):
                 self.audio.export_wav(path)
                 
                 progress.close()
-                QMessageBox.information(self, "完了", "WAVファイルの書き出しが完了しました。")
+                QMessageBox.information(
+                    self,
+                    tr("完了", "Done"),
+                    tr("WAVファイルの書き出しが完了しました。", "WAV export completed.")
+                )
             elif (
                 selected_filter == "Synthesizer V Project (*.svp)" or
                 path.lower().endswith(".svp")
@@ -2476,20 +2643,31 @@ class MainWindow(QMainWindow):
                 self.midi.save_svp(path)
                 self._last_midi_path = path
                 self._last_midi_is_svp = True
-                QMessageBox.information(self, "完了", "SVPファイルの保存が完了しました。")
+                QMessageBox.information(
+                    self,
+                    tr("完了", "Done"),
+                    tr("SVPファイルの保存が完了しました。", "SVP file saved.")
+                )
             else:
                 if not path.lower().endswith((".mid", ".midi")):
                     path += ".mid"
                 self.midi.save(path)
                 self._last_midi_path = path
                 self._last_midi_is_svp = False
-                QMessageBox.information(self, "完了", "MIDIファイルの保存が完了しました。")
+                QMessageBox.information(
+                    self,
+                    tr("完了", "Done"),
+                    tr("MIDIファイルの保存が完了しました。", "MIDI file saved.")
+                )
                 
         except Exception as e:
             QMessageBox.critical(
                 self,
-                "エラー",
-                f"保存中にエラーが発生しました:\n{e}"
+                tr("エラー", "Error"),
+                tr(
+                    f"保存中にエラーが発生しました:\n{e}",
+                    f"An error occurred while saving:\n{e}"
+                )
             )
 
     def update_editor(self):
@@ -2509,7 +2687,7 @@ class MainWindow(QMainWindow):
                 self._analysis_error = None
                 QMessageBox.critical(
                     self,
-                    "エラー",
+                    tr("エラー", "Error"),
                     str(error)
                 )
             else:
