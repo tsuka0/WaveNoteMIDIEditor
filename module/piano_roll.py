@@ -23,6 +23,10 @@ class PianoRoll(QWidget):
     ):
         super().__init__()
 
+        self.setMouseTracking(
+            True
+        )
+
         self.audio = audio
         self.spectrum = spectrum
         self.midi = midi
@@ -179,10 +183,6 @@ class PianoRoll(QWidget):
         )
         self._tap_anim_timer.timeout.connect(
             self._tap_tick
-        )
-
-        self.setMouseTracking(
-            True
         )
 
         self.setFocusPolicy(
@@ -2350,9 +2350,22 @@ class PianoRoll(QWidget):
             ):
                 self.press_moved = True
 
-            snapped_start_mouse = self.snap_time(self.x_to_time(self.drag_start.x()))
-            snapped_current_mouse = self.snap_time(self.x_to_time(x))
-            new_start = original_start + (snapped_current_mouse - snapped_start_mouse)
+            snapped_start_mouse = self.snap_time(
+                self.x_to_time(
+                    self.drag_start.x()
+                )
+            )
+            snapped_current_mouse = self.snap_time(
+                self.x_to_time(x)
+            )
+
+            new_start = (
+                original_start +
+                (
+                    snapped_current_mouse -
+                    snapped_start_mouse
+                )
+            )
 
             new_pitch = (
                 original_pitch -
@@ -2535,6 +2548,16 @@ class PianoRoll(QWidget):
         self.press_moved = False
         self._previewed_pitch = None
         self._nudge_undo_pushed = False
+
+        self._refresh_cursor_under_mouse()
+
+    def _refresh_cursor_under_mouse(self):
+        from PySide6.QtGui import QCursor
+        pos = self.mapFromGlobal(QCursor.pos())
+        self.update_cursor(
+            pos.x(),
+            pos.y()
+        )
 
     def update_cursor(
         self,
