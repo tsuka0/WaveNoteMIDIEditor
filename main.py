@@ -2001,6 +2001,7 @@ class MainWindow(QMainWindow):
 
         self.audio.stop()
         self.midi = MidiData()
+        self.midi.play_all_tracks = self.play_all_tracks_button.isChecked()
         self.audio.clear()
         self.editor.set_midi(self.midi)
         self.editor.clear_audio()
@@ -2083,6 +2084,7 @@ class MainWindow(QMainWindow):
 
         # MIDIトラックの再構築
         self.midi = MidiData()
+        self.midi.play_all_tracks = self.play_all_tracks_button.isChecked()
         self.midi.tracks.clear()
         raw_tempos = project.get("midi_tempos", [(0.0, 120.0)])
         self.midi.tempos = [
@@ -2682,7 +2684,7 @@ class MainWindow(QMainWindow):
 
 
             self.editor.set_track_filter(
-                None
+                0
             )
 
             self.refresh_track_combo()
@@ -2848,7 +2850,13 @@ class MainWindow(QMainWindow):
                     self._pending_tempo_analysis = None
 
                     self.midi.set_base_tempo(bpm)
-                    self.midi.set_beat_phase(0.0)
+
+                    # グリッドの拍1が必ず開始位置(0秒)に来るようにする。
+                    # 開始位置より前に拍が読めるグリッドを作らない。
+                    # beat_to_time(1) = (1 - beat_phase) * (60/bpm) = 0
+                    self.midi.set_beat_phase(
+                        1.0
+                    )
                     self.editor.bpm = bpm
 
 
