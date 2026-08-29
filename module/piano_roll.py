@@ -5814,10 +5814,14 @@ class PianoRoll(QWidget):
                 self.top_height
             )
 
+            disp_bpm = (
+                math.floor(bpm * 1000.0 + 1e-9) / 1000.0
+            )
+
             painter.drawText(
                 int(x + 3),
                 self.top_height - 13,
-                f"BPM{bpm:g}"
+                f"BPM{disp_bpm:g}"
             )
 
         painter.setPen(
