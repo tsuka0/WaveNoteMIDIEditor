@@ -91,14 +91,18 @@ def get_shortcut(key):
         return str(val)
     return DEFAULT_SHORTCUTS.get(key, "")
 
-def toggle_button_style(checked_color):
-    """トグルボタンのスタイル。ONのとき分かりやすいように
-    指定色で塗りつぶす。"""
-    return (
-        "QPushButton { margin-left: 8px; padding: 2px 10px; }"
-        f"QPushButton:checked {{ background-color: {checked_color}; "
-        f"border-color: {checked_color}; color: white; font-weight: bold; }}"
-    )
+def apply_toggle_style(btn, checked_color):
+    """トグルボタンのスタイル。ONのとき分かりやすいように指定色で塗りつぶし、
+    OFFのときはOSのテーマ(ダーク/ライト)に従うようにスタイルシートをリセットする。"""
+    def update_style(checked):
+        if checked:
+            btn.setStyleSheet(f"background-color: {checked_color}; color: white; font-weight: bold; border: none; padding: 4px 10px; border-radius: 4px;")
+        else:
+            btn.setStyleSheet("")
+    
+    btn.toggled.connect(update_style)
+    # 遅延適用 (初期化直後は状態が反映されない場合があるため)
+    QTimer.singleShot(0, lambda: update_style(btn.isChecked()))
 
 
 def make_help_badge(tooltip):
@@ -1316,9 +1320,9 @@ class MainWindow(QMainWindow):
         self.return_to_start_checkbox = QCheckBox(
             tr("停止時に開始位置へ戻る", "Return to start position on stop")
         )
-        self.return_to_start_checkbox.setStyleSheet(
-            "QCheckBox { margin-left: 8px; }"
-        )
+        spacer1 = QWidget()
+        spacer1.setFixedWidth(8)
+        toolbar.addWidget(spacer1)
         self.return_to_start_checkbox.setChecked(
             self.editor.return_to_start_on_stop
         )
@@ -1334,9 +1338,10 @@ class MainWindow(QMainWindow):
             tr("MIDIをミュート", "Mute MIDI")
         )
         self.mute_midi_button.setCheckable(True)
-        self.mute_midi_button.setStyleSheet(
-            toggle_button_style("#c0392b")
-        )
+        spacer2 = QWidget()
+        spacer2.setFixedWidth(8)
+        toolbar.addWidget(spacer2)
+        apply_toggle_style(self.mute_midi_button, "#c0392b")
         self.mute_midi_button.setToolTip(
             tr("再生時にMIDI音を鳴らさず、波形(オーディオ)のみ再生します", "Play only the waveform (audio) without MIDI sounds during playback")
         )
@@ -1355,9 +1360,10 @@ class MainWindow(QMainWindow):
             tr("MIDI全体を再生", "Play All MIDI Tracks")
         )
         self.play_all_tracks_button.setCheckable(True)
-        self.play_all_tracks_button.setStyleSheet(
-            toggle_button_style("#2e7d32")
-        )
+        spacer3 = QWidget()
+        spacer3.setFixedWidth(8)
+        toolbar.addWidget(spacer3)
+        apply_toggle_style(self.play_all_tracks_button, "#2e7d32")
         self.play_all_tracks_button.setToolTip(
             tr("単一トラック選択中でも、全トラックのMIDIを鳴らして再生します", "Play MIDI from all tracks even when a single track is selected")
         )
@@ -1506,9 +1512,10 @@ class MainWindow(QMainWindow):
         # Audio Mute
         self.mute_audio_button = QPushButton(tr("音声ミュート", "Mute Audio"))
         self.mute_audio_button.setCheckable(True)
-        self.mute_audio_button.setStyleSheet(
-            toggle_button_style("#c0392b")
-        )
+        spacer4 = QWidget()
+        spacer4.setFixedWidth(8)
+        audio_toolbar.addWidget(spacer4)
+        apply_toggle_style(self.mute_audio_button, "#c0392b")
         self.mute_audio_button.setToolTip(
             tr("音声ファイルの再生をミュートします(MIDI音源は鳴り続けます)", "Mutes audio file playback (MIDI keeps playing)")
         )
