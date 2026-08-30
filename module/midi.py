@@ -36,6 +36,8 @@ class Track:
     notes: list = field(default_factory=list)
     pedals: list = field(default_factory=list)
     channel: int = 0
+    audio_file: str = ""
+    audio_params: dict = field(default_factory=dict)
 
 def shiftjis_safe_text(text):
     """MIDIテキストイベント用にCP932(Shift-JIS)で表現できる文字列にする。
@@ -95,7 +97,9 @@ class MidiData:
                         copy.copy(p)
                         for p in track.pedals
                     ],
-                    channel=track.channel
+                    channel=track.channel,
+                    audio_file=track.audio_file,
+                    audio_params=dict(track.audio_params)
                 )
                 for track in self.tracks
             ],
@@ -128,7 +132,9 @@ class MidiData:
                     )
                     for pedal in track.pedals
                 ],
-                channel=getattr(track, 'channel', 0)
+                channel=getattr(track, 'channel', 0),
+                audio_file=getattr(track, 'audio_file', ""),
+                audio_params=dict(getattr(track, 'audio_params', {}))
             )
             for track in snap["tracks"]
         ]

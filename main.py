@@ -59,6 +59,7 @@ from module.audio import AudioData
 from module.spectrum import SpectrumData
 from module.midi import MidiData, Note, PedalEvent
 from module.piano_roll import PianoRoll
+from module import midiout
 from module.midiout import list_ports
 from module.settings import load_value, save_value, delete_value, load_last_dir, save_last_dir_from_path
 from module.i18n import tr, get_language, set_language, LANGUAGES
@@ -76,7 +77,9 @@ DEFAULT_SHORTCUTS = {
     "action_redo": "Ctrl+Y",
     "action_play": "Space",
     "action_split": "S",
-    "action_select_all": "Ctrl+A"
+    "action_select_all": "Ctrl+A",
+    "action_copy": "Ctrl+C",
+    "action_paste": "Ctrl+V"
 }
 
 if ENABLE_LYRICS:
@@ -228,7 +231,9 @@ class ShortcutDialog(QDialog):
             "action_redo": tr("やり直し", "Redo"),
             "action_play": tr("再生 / 停止", "Play / Stop"),
             "action_split": tr("ノーツを分割", "Split Notes"),
-            "action_select_all": tr("すべて選択", "Select All")
+            "action_select_all": tr("すべて選択", "Select All"),
+            "action_copy": tr("コピー", "Copy"),
+            "action_paste": tr("ペースト", "Paste")
         }
 
         if ENABLE_LYRICS:
@@ -607,6 +612,8 @@ class MainWindow(QMainWindow):
         self.menuBar().setContextMenuPolicy(Qt.PreventContextMenu)
 
         self.audio = AudioData()
+        self._global_audio = self.audio
+        self.track_audio = {}
         self.spectrum = SpectrumData()
         self.midi = MidiData()
 
@@ -710,6 +717,7 @@ class MainWindow(QMainWindow):
         self._pending_audio_duration = None
         self._pending_tempo_analysis = None
         self._pending_tap_onsets = None
+        self._tempo_analyzed = False
         self._project_path = None
         self._last_midi_path = None
         self._last_midi_is_svp = False
@@ -949,6 +957,10 @@ class MainWindow(QMainWindow):
         self.discord_rpc_timer.stop()
         self.discord_rpc.close()
         self.audio.close()
+        self._global_audio.close()
+        for ta in self.track_audio.values():
+            ta.close()
+        midiout.shared_manager.close_all()
         super().closeEvent(event)
 
     def create_menu(self):
@@ -1029,6 +1041,30 @@ class MainWindow(QMainWindow):
             redo_action
         )
 
+        copy_action = QAction(
+            tr("コピー", "Copy"),
+            self
+        )
+        copy_action.setShortcut(
+            QKeySequence.StandardKey.Copy
+        )
+        copy_action.triggered.connect(
+            self.editor.copy_selected
+        )
+        edit_menu.addAction(copy_action)
+
+        paste_action = QAction(
+            tr("ペースト", "Paste"),
+            self
+        )
+        paste_action.setShortcut(
+            QKeySequence.StandardKey.Paste
+        )
+        paste_action.triggered.connect(
+            self.editor.paste_notes
+        )
+        edit_menu.addAction(paste_action)
+
         playback_menu = self.menuBar().addMenu(
             tr("再生", "Playback")
         )
@@ -1064,6 +1100,8 @@ class MainWindow(QMainWindow):
         self.actions["action_save_midi"] = save_action
         self.actions["action_undo"] = undo_action
         self.actions["action_redo"] = redo_action
+        self.actions["action_copy"] = copy_action
+        self.actions["action_paste"] = paste_action
         self.actions["action_play"] = play_action
         self.actions["action_split"] = split_action
 
@@ -1611,9 +1649,387 @@ class MainWindow(QMainWindow):
         self.track_combo.setCurrentIndex(idx)
 
     def change_track(self, index):
+        self._persist_active_audio_params()
         self.editor.set_track_filter(
             self.track_combo.currentData()
         )
+        self._apply_audio_context()
+
+    def _current_audio(self):
+        """現在のトラックコンテキストで参照すべき音声を返す。
+
+        単一トラック選択時はそのトラック専用の音声(あれば)を、
+        それ以外は全体トラック用の音声を返す。
+        """
+        index = self.midi.filter_track
+        if index is not None and 0 <= index < len(self.midi.tracks):
+            track = self.midi.tracks[index]
+            if track.audio_file:
+                return self._ensure_track_audio(index)
+        return self._global_audio
+
+    def _active_track_index(self):
+        """現在アクティブな音声が単一トラック専用の場合そのindexを返す。"""
+        for index, ta in self.track_audio.items():
+            if ta is self.audio:
+                return index
+        return None
+
+    def _ensure_track_audio(self, track_index):
+        ta = self.track_audio.get(track_index)
+        if ta is not None:
+            return ta
+
+        track = self.midi.tracks[track_index]
+        ta = AudioData()
+
+        ta.spectrum = SpectrumData()
+
+        global_audio = self._global_audio
+
+        ta.set_output_device(
+            global_audio.output_device
+        )
+        ta.midi_muted = global_audio.midi_muted
+        ta.set_midi(self.midi)
+
+        if track.audio_params:
+            self._apply_params_to_audio(
+                ta,
+                track.audio_params
+            )
+        else:
+            ta.volume = global_audio.volume
+            ta.offset = global_audio.offset
+            ta.channel_mode = global_audio.channel_mode
+            ta.eq_low = global_audio.eq_low
+            ta.eq_mid = global_audio.eq_mid
+            ta.eq_high = global_audio.eq_high
+            ta.audio_muted = global_audio.audio_muted
+            ta.a4_freq = global_audio.a4_freq
+
+        self.track_audio[track_index] = ta
+
+        return ta
+
+    def _collect_audio_params(self, audio):
+        return {
+            "volume": audio.volume,
+            "offset": audio.offset,
+            "channel": audio.channel_mode,
+            "eq_low": audio.eq_low,
+            "eq_mid": audio.eq_mid,
+            "eq_high": audio.eq_high,
+            "muted": audio.audio_muted,
+            "a4": audio.a4_freq,
+        }
+
+    def _apply_params_to_audio(self, audio, params):
+        audio.volume = float(
+            params.get("volume", audio.volume)
+        )
+        audio.offset = float(
+            params.get("offset", audio.offset)
+        )
+        audio.channel_mode = int(
+            params.get("channel", audio.channel_mode)
+        )
+        audio.eq_low = float(
+            params.get("eq_low", audio.eq_low)
+        )
+        audio.eq_mid = float(
+            params.get("eq_mid", audio.eq_mid)
+        )
+        audio.eq_high = float(
+            params.get("eq_high", audio.eq_high)
+        )
+        audio.audio_muted = bool(
+            params.get("muted", audio.audio_muted)
+        )
+        audio.a4_freq = float(
+            params.get("a4", audio.a4_freq)
+        )
+
+    def _persist_active_audio_params(self):
+        for index, ta in self.track_audio.items():
+            if ta is self.audio:
+                if 0 <= index < len(self.midi.tracks):
+                    track = self.midi.tracks[index]
+
+                    track.audio_params = self._collect_audio_params(
+                        ta
+                    )
+                return
+
+    def _sync_audio_ui(self, audio=None):
+        if not hasattr(self, "offset_box"):
+            return
+
+        audio = audio or self.audio
+
+        self.offset_box.blockSignals(True)
+        self.offset_box.setValue(
+            audio.offset or 0.0
+        )
+        self.offset_box.blockSignals(False)
+
+        self.volume_slider.blockSignals(True)
+        self.volume_slider.setValue(
+            int((audio.volume or 0.5) * 100)
+        )
+        self.volume_slider.blockSignals(False)
+
+        self.channel_combo.blockSignals(True)
+        self.channel_combo.setCurrentIndex(
+            audio.channel_mode or 0
+        )
+        self.channel_combo.blockSignals(False)
+
+        self.eq_low_slider.blockSignals(True)
+        self.eq_low_slider.setValue(
+            int((audio.eq_low or 1.0) * 100)
+        )
+        self.eq_low_slider.blockSignals(False)
+
+        self.eq_mid_slider.blockSignals(True)
+        self.eq_mid_slider.setValue(
+            int((audio.eq_mid or 1.0) * 100)
+        )
+        self.eq_mid_slider.blockSignals(False)
+
+        self.eq_high_slider.blockSignals(True)
+        self.eq_high_slider.setValue(
+            int((audio.eq_high or 1.0) * 100)
+        )
+        self.eq_high_slider.blockSignals(False)
+
+        self.mute_audio_button.blockSignals(True)
+        self.mute_audio_button.setChecked(
+            bool(audio.audio_muted)
+        )
+        self.mute_audio_button.blockSignals(False)
+
+        self.sync_preset_combo()
+
+    def _apply_audio_context(self):
+        self._persist_active_audio_params()
+
+        target = self._current_audio()
+
+        if target is not self.audio:
+            if self.audio.playing:
+                self.audio.stop()
+
+            self.audio = target
+
+            self.editor.set_audio(target)
+
+        self._maybe_load_active_audio()
+
+        self._sync_audio_ui()
+        self.update_title()
+
+    def _resolve_audio_path(self, audio_file):
+        if not audio_file:
+            return None
+
+        if os.path.exists(audio_file):
+            return os.path.abspath(audio_file)
+
+        proj_dir = None
+
+        if self._project_path:
+            proj_dir = Path(self._project_path).resolve().parent
+
+        if proj_dir:
+            cand1 = proj_dir / audio_file
+            if cand1.exists():
+                return str(cand1.resolve())
+
+            cand2 = proj_dir / Path(audio_file).name
+            if cand2.exists():
+                return str(cand2.resolve())
+
+        return None
+
+    def _load_audio_into(
+        self,
+        audio,
+        resolved_audio_file,
+        window_title,
+        restore_params=None
+    ):
+        self._analysis_token += 1
+        token = self._analysis_token
+        self._analysis_ready = False
+        self._analysis_error = None
+        self._pending_audio_duration = None
+        self._pending_tempo_analysis = None
+        self._pending_tap_onsets = None
+
+        if getattr(audio, "spectrum", None) is None:
+            audio.spectrum = SpectrumData()
+
+        # 作曲テンポの基準はMIDIファイル(または最初の音声から計測したテンポ)。
+        # 最初の音声ロード時のみテンポを解析し、以降の音声では上書きしない。
+        analyze_tempo = (
+            not self.midi.has_file and
+            not self._tempo_analyzed
+        )
+
+        is_active = self.audio is audio
+
+        audio.clear()
+
+        if is_active:
+            # 読み込み対象が現在表示中の音声の場合のみエディタ表示を
+            # リセットする。バックグラウンド対象への読み込みでは
+            # 現在表示中の音声(全体トラック等)の解析結果を保持する。
+            self.editor.clear_audio()
+            self.editor._spectrum_image = None
+            self.editor._spectrum_key = None
+
+        def worker():
+            try:
+                duration = audio.load(resolved_audio_file)
+                if token != self._analysis_token:
+                    return
+
+                self._pending_audio_duration = duration
+
+                audio.spectrum.analyze(
+                    audio.y_mono,
+                    audio.sr,
+                    self.editor.min_pitch,
+                    self.editor.max_pitch,
+                    audio.a4_freq
+                )
+
+                if analyze_tempo:
+                    try:
+                        tempo_result = audio.spectrum.analyze_tempo(
+                            audio.y_mono,
+                            audio.sr
+                        )
+                    except Exception:
+                        tempo_result = None
+
+                    if token == self._analysis_token:
+                        self._pending_tempo_analysis = tempo_result
+
+                if token != self._analysis_token:
+                    return
+
+                try:
+                    from module.taptempo import compute_onset_envelope
+                    onset_times, onset_strengths = compute_onset_envelope(
+                        audio.y_mono,
+                        audio.sr
+                    )
+                except Exception:
+                    onset_times, onset_strengths = [], []
+
+                if token == self._analysis_token:
+                    self._pending_tap_onsets = (onset_times, onset_strengths)
+                if token == self._analysis_token:
+                    self._analysis_ready = True
+            except Exception as e:
+                if token == self._analysis_token:
+                    self._analysis_error = e
+                    self._analysis_ready = True
+
+        progress = QProgressDialog(
+            tr("オーディオとスペクトラムを解析中...", "Analyzing audio and spectrum..."),
+            tr("キャンセル", "Cancel"), 0, 0, self
+        )
+        progress.setWindowTitle(window_title)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setCancelButton(None)
+        progress.show()
+
+        thread = threading.Thread(
+            target=worker,
+            daemon=True
+        )
+        thread.start()
+
+        while not self._analysis_ready and thread.is_alive():
+            QApplication.processEvents()
+            time.sleep(0.01)
+
+        progress.close()
+
+        if restore_params:
+            self._apply_params_to_audio(
+                audio,
+                restore_params
+            )
+
+        self._refresh_timeline_reference()
+
+    def _refresh_timeline_reference(self):
+        ends = [0.0]
+
+        def candidate(a):
+            if a.file_path is None:
+                return 0.0
+            return a.duration() + a.offset
+
+        ends.append(candidate(self._global_audio))
+
+        for ta in self.track_audio.values():
+            ends.append(candidate(ta))
+
+        self.editor.set_timeline_reference_end(
+            max(ends)
+        )
+
+    def _maybe_load_active_audio(self):
+        index = self.midi.filter_track
+
+        if index is None or not (0 <= index < len(self.midi.tracks)):
+            return
+
+        track = self.midi.tracks[index]
+
+        if not track.audio_file:
+            return
+
+        ta = self.track_audio.get(index)
+
+        if ta is None:
+            ta = self._ensure_track_audio(index)
+
+        if ta.file_path is not None:
+            return
+
+        resolved = self._resolve_audio_path(
+            track.audio_file
+        )
+
+        if not resolved:
+            return
+
+        keep_position = self.editor.play_position
+
+        self._load_audio_into(
+            ta,
+            resolved,
+            tr("オーディオを開く", "Open Audio"),
+            restore_params=track.audio_params or None
+        )
+
+        self.update_editor()
+
+        self.editor.audio.position = keep_position
+
+        self.editor.set_play_position(keep_position)
+
+        self.editor.follow_play_position(
+            force=True
+        )
+
+        self.editor.update()
 
     def add_track(self):
         self.midi.push_undo()
@@ -1665,6 +2081,7 @@ class MainWindow(QMainWindow):
 
     def change_mute_audio(self, checked):
         self.audio.audio_muted = checked
+        self._persist_active_audio_params()
         save_value(
             "mute_audio",
             "1" if checked else "0"
@@ -1680,6 +2097,8 @@ class MainWindow(QMainWindow):
 
     def change_offset(self, value):
         self.audio.offset = value
+        self._persist_active_audio_params()
+        self._refresh_timeline_reference()
         self.editor.update()
 
     def change_threshold(self, value):
@@ -1700,18 +2119,21 @@ class MainWindow(QMainWindow):
             value /
             100.0
         )
+        self._persist_active_audio_params()
 
     def change_channel_mode(self, index):
         self.audio.channel_mode = index
         self.audio.apply_dsp()
         self.update_spectrum()
         self.sync_preset_combo()
+        self._persist_active_audio_params()
 
     def change_eq(self):
         self.audio.eq_low = self.eq_low_slider.value() / 100.0
         self.audio.eq_mid = self.eq_mid_slider.value() / 100.0
         self.audio.eq_high = self.eq_high_slider.value() / 100.0
         self.sync_preset_combo()
+        self._persist_active_audio_params()
 
     def reset_eq(self):
         self.eq_low_slider.setValue(100)
@@ -1861,10 +2283,17 @@ class MainWindow(QMainWindow):
     def update_spectrum(self):
         if getattr(self.audio, "y_mono", None) is None:
             return
+
+        if getattr(self.audio, "spectrum", None) is None:
+            self.audio.spectrum = SpectrumData()
+
+        if self.editor.spectrum is not self.audio.spectrum:
+            self.editor.spectrum = self.audio.spectrum
+
         # Show progress or just block briefly
         # Since analyze is fast enough, we just run it directly. If it takes too long, 
         # it should be put in a thread. But it's usually acceptable for CQT cache warmups.
-        self.spectrum.analyze(
+        self.audio.spectrum.analyze(
             self.audio.y_mono,
             self.audio.sr,
             self.editor.min_pitch,
@@ -1893,13 +2322,18 @@ class MainWindow(QMainWindow):
             "midi_tempos": self.midi.tempos,
             "midi_timesigs": self.midi.time_signatures,
             "midi_beat_phase": getattr(self.midi, "beat_phase", 0.0),
-            "audio_offset": self.audio.offset,
-            "audio_volume": self.audio.volume,
-            "audio_file": self.audio.file_path,
-            "audio_a4_freq": getattr(self.audio, "a4_freq", 440.0),
+            "audio_offset": self._global_audio.offset,
+            "audio_volume": self._global_audio.volume,
+            "audio_file": self._global_audio.file_path,
+            "audio_a4_freq": getattr(self._global_audio, "a4_freq", 440.0),
+            "audio_channel": getattr(self._global_audio, "channel_mode", 0),
+            "audio_eq_low": getattr(self._global_audio, "eq_low", 1.0),
+            "audio_eq_mid": getattr(self._global_audio, "eq_mid", 1.0),
+            "audio_eq_high": getattr(self._global_audio, "eq_high", 1.0),
+            "audio_muted": getattr(self._global_audio, "audio_muted", False),
         }
 
-        for track in self.midi.tracks:
+        for index, track in enumerate(self.midi.tracks):
             def note_dict(note):
                 data = {
                     "start": note.start,
@@ -1913,6 +2347,18 @@ class MainWindow(QMainWindow):
                     data["lyric"] = getattr(note, "lyric", "")
 
                 return data
+
+            track_audio = self.track_audio.get(index)
+
+            if (
+                track_audio is not None and
+                track_audio.file_path
+            ):
+                track.audio_file = track_audio.file_path
+
+                track.audio_params = self._collect_audio_params(
+                    track_audio
+                )
 
             project["midi_tracks"].append({
                 "name": track.name,
@@ -1928,6 +2374,10 @@ class MainWindow(QMainWindow):
                     }
                     for pedal in track.pedals
                 ],
+                "audio_file": getattr(track, "audio_file", "") or "",
+                "audio_params": dict(
+                    getattr(track, "audio_params", {})
+                ),
             })
 
         return project
@@ -1945,12 +2395,48 @@ class MainWindow(QMainWindow):
             tuple(self.midi.tempos),
             len(self.midi.time_signatures),
             float(getattr(self.midi, "beat_phase", 0.0)),
-            self.audio.offset,
-            self.audio.volume,
-            getattr(self.audio, "a4_freq", 440.0),
+            self._global_audio.offset,
+            self._global_audio.volume,
+            getattr(self._global_audio, "a4_freq", 440.0),
+            getattr(self._global_audio, "channel_mode", 0),
+            getattr(self._global_audio, "eq_low", 1.0),
+            getattr(self._global_audio, "eq_mid", 1.0),
+            getattr(self._global_audio, "eq_high", 1.0),
+            getattr(self._global_audio, "audio_muted", False),
             self.midi.filter_track,
+            self._track_audio_state(),
         )
         return counts
+
+    def _track_audio_state(self):
+        state = []
+
+        for index, track in enumerate(self.midi.tracks):
+            audio_file = (
+                getattr(track, "audio_file", "") or ""
+            )
+
+            params = dict(
+                getattr(track, "audio_params", {}) or {}
+            )
+
+            ta = self.track_audio.get(index)
+
+            if ta is not None and ta.file_path:
+                audio_file = ta.file_path
+
+                params = self._collect_audio_params(ta)
+
+            state.append(
+                (
+                    audio_file,
+                    tuple(
+                        sorted(params.items())
+                    )
+                )
+            )
+
+        return tuple(state)
 
     def _mark_project_saved(self):
         self._saved_project_state = self._project_state()
@@ -2002,12 +2488,24 @@ class MainWindow(QMainWindow):
         self.audio.stop()
         self.midi = MidiData()
         self.midi.play_all_tracks = self.play_all_tracks_button.isChecked()
+
+        for ta in self.track_audio.values():
+            ta.clear()
+            ta.close()
+        self.track_audio.clear()
+        self.track_audio = {}
+
+        self.audio = self._global_audio
+        self.editor.set_audio(self._global_audio)
+
         self.audio.clear()
         self.editor.set_midi(self.midi)
         self.editor.clear_audio()
         self.refresh_track_combo()
         self._project_path = None
         self._mark_project_saved()
+        self._tempo_analyzed = False
+        self._refresh_timeline_reference()
         self.editor.update_timeline()
         self.editor.update()
 
@@ -2106,9 +2604,22 @@ class MainWindow(QMainWindow):
         self.midi.has_file = bool(project.get("midi_tracks"))
 
         # トラックの再構築
+        for ta in self.track_audio.values():
+            ta.clear()
+            ta.close()
+        self.track_audio.clear()
+        self.track_audio = {}
+
+        self._project_path = path
+        self._tempo_analyzed = False
+
         for track_data in project.get("midi_tracks", []):
             track = self.midi.add_track(name=track_data.get("name"))
             track.channel = track_data.get("channel", len(self.midi.tracks) - 1)
+            track.audio_file = track_data.get("audio_file", "") or ""
+            track.audio_params = dict(
+                track_data.get("audio_params", {}) or {}
+            )
             for note_data in track_data.get("notes", []):
                 note_kwargs = {
                     "start": note_data["start"],
@@ -2140,119 +2651,109 @@ class MainWindow(QMainWindow):
 
         self.midi._bump()
 
-        # 音声設定の復元
+        # 全体トラック用の音声設定の復元
         project_audio_offset = project.get("audio_offset", 0.0)
         project_audio_volume = project.get("audio_volume", 0.5)
         project_audio_a4 = project.get("audio_a4_freq", 440.0)
-        self.audio.offset = project_audio_offset
-        self.audio.volume = project_audio_volume
-        self.audio.a4_freq = project_audio_a4
+        project_audio_channel = project.get("audio_channel", 0)
+        project_audio_eq_low = project.get("audio_eq_low", 1.0)
+        project_audio_eq_mid = project.get("audio_eq_mid", 1.0)
+        project_audio_eq_high = project.get("audio_eq_high", 1.0)
+        project_audio_muted = bool(project.get("audio_muted", False))
+        self._global_audio.clear()
+        self._global_audio.offset = project_audio_offset
+        self._global_audio.volume = project_audio_volume
+        self._global_audio.a4_freq = project_audio_a4
+        self._global_audio.channel_mode = int(project_audio_channel)
+        self._global_audio.eq_low = float(project_audio_eq_low)
+        self._global_audio.eq_mid = float(project_audio_eq_mid)
+        self._global_audio.eq_high = float(project_audio_eq_high)
+        self._global_audio.audio_muted = project_audio_muted
 
         # エディタにMIDIを設定
         self.editor.set_midi(self.midi)
-        self.audio.set_midi(self.midi)
+        self._global_audio.set_midi(self.midi)
 
-        # ツールバーUIの同期
-        self.offset_box.blockSignals(True)
-        self.offset_box.setValue(project_audio_offset)
-        self.offset_box.blockSignals(False)
-
-        self.volume_slider.blockSignals(True)
-        self.volume_slider.setValue(int(project_audio_volume * 100))
-        self.volume_slider.blockSignals(False)
+        # 復元したトラック選択に応じたアクティブな音声へ切り替える。
+        # (トラックに専用音声の登録がある場合はそのトラック専用の
+        #  AudioDataが_ensure_track_audio経由で生成され、パラメータも復元される)
+        target_audio = self._current_audio()
+        self.audio = target_audio
+        self.editor.set_audio(target_audio)
 
         # 音声ファイルの解決とスペクトラム解析（非同期）
-        audio_file = project.get("audio_file")
-        resolved_audio_file = None
-        if audio_file:
-            if os.path.exists(audio_file):
-                resolved_audio_file = os.path.abspath(audio_file)
-            else:
-                proj_dir = Path(path).resolve().parent
-                cand1 = proj_dir / audio_file
-                if cand1.exists():
-                    resolved_audio_file = str(cand1.resolve())
-                else:
-                    cand2 = proj_dir / Path(audio_file).name
-                    if cand2.exists():
-                        resolved_audio_file = str(cand2.resolve())
+        if target_audio is self._global_audio:
+            audio_file = project.get("audio_file")
+            restore_params = {
+                "volume": project_audio_volume,
+                "offset": project_audio_offset,
+                "a4": project_audio_a4,
+                "channel": project_audio_channel,
+                "eq_low": project_audio_eq_low,
+                "eq_mid": project_audio_eq_mid,
+                "eq_high": project_audio_eq_high,
+                "muted": project_audio_muted,
+            }
+        else:
+            active_index = self.midi.filter_track
+            audio_file = self.midi.tracks[active_index].audio_file
+            restore_params = (
+                self.midi.tracks[active_index].audio_params or None
+            )
+
+        resolved_audio_file = self._resolve_audio_path(
+            audio_file
+        ) if audio_file else None
 
         if resolved_audio_file:
-            self._analysis_token += 1
-            token = self._analysis_token
-            self._analysis_ready = False
-            self._analysis_error = None
-            self._pending_audio_duration = None
-            self._pending_tempo_analysis = None
-            self._pending_tap_onsets = None
-    
-            self.audio.clear()
-            self.audio.offset = project_audio_offset
-            self.audio.volume = project_audio_volume
-            self.audio.file_path = resolved_audio_file
-            self.editor.clear_audio()
-            self.editor._spectrum_image = None
-            self.editor._spectrum_key = None
-
-            def worker():
-                try:
-                    duration = self.audio.load(resolved_audio_file)
-                    if token != self._analysis_token:
-                        return
-
-                    self._pending_audio_duration = duration
-
-                    self.spectrum.analyze(
-                        self.audio.y_mono,
-                        self.audio.sr,
-                        self.editor.min_pitch,
-                        self.editor.max_pitch,
-                        self.audio.a4_freq
+            # 全体トラック用の音声を先に読み込む。
+            # 専用音声のないトラックは全体トラック用の音声を参照するため、
+            # プロジェクトを開いた直後から再生できるようにする。
+            # 作曲テンポの基準も全体トラック用の音声にする。
+            if target_audio is not self._global_audio:
+                global_file = project.get("audio_file")
+                global_resolved = (
+                    self._resolve_audio_path(global_file)
+                    if global_file else None
+                )
+                if (
+                    global_resolved and
+                    os.path.abspath(global_resolved) !=
+                    os.path.abspath(resolved_audio_file)
+                ):
+                    global_analyzed_tempo = (
+                        not self.midi.has_file and
+                        not self._tempo_analyzed
                     )
-                    if token != self._analysis_token:
-                        return
+                    self._load_audio_into(
+                        self._global_audio,
+                        global_resolved,
+                        tr("プロジェクトを開く", "Open Project"),
+                        restore_params={
+                            "volume": project_audio_volume,
+                            "offset": project_audio_offset,
+                            "a4": project_audio_a4,
+                            "channel": project_audio_channel,
+                            "eq_low": project_audio_eq_low,
+                            "eq_mid": project_audio_eq_mid,
+                            "eq_high": project_audio_eq_high,
+                            "muted": project_audio_muted,
+                        }
+                    )
+                    if global_analyzed_tempo:
+                        # 全体トラック用の音声がテンポの基準になったので、
+                        # 続いて読み込むトラック専用の音声では上書きしない。
+                        self._tempo_analyzed = True
 
-                    try:
-                        from module.taptempo import compute_onset_envelope
-                        onset_times, onset_strengths = compute_onset_envelope(
-                            self.audio.y_mono,
-                            self.audio.sr
-                        )
-                    except Exception:
-                        onset_times, onset_strengths = [], []
-
-                    if token == self._analysis_token:
-                        self._pending_tap_onsets = (onset_times, onset_strengths)
-                    if token == self._analysis_token:
-                        self._analysis_ready = True
-                except Exception as e:
-                    if token == self._analysis_token:
-                        self._analysis_error = e
-                        self._analysis_ready = True
-
-            progress = QProgressDialog(
-                tr("オーディオとスペクトラムを解析中...", "Analyzing audio and spectrum..."),
-                tr("キャンセル", "Cancel"), 0, 0, self
+            self._load_audio_into(
+                target_audio,
+                resolved_audio_file,
+                tr("プロジェクトを開く", "Open Project"),
+                restore_params=restore_params
             )
-            progress.setWindowTitle(tr("プロジェクトを開く", "Open Project"))
-            progress.setWindowModality(Qt.WindowModal)
-            progress.setCancelButton(None)
-            progress.show()
-
-            thread = threading.Thread(
-                target=worker,
-                daemon=True
-            )
-            thread.start()
-
-            while not self._analysis_ready and thread.is_alive():
-                QApplication.processEvents()
-                time.sleep(0.01)
-                
-            progress.close()
             self.update_editor()
         else:
-            self.audio.clear()
+            target_audio.clear()
             self.editor.clear_audio()
             self.editor.update_timeline()
             if audio_file:
@@ -2269,6 +2770,8 @@ class MainWindow(QMainWindow):
         self.editor.set_track_filter(self.midi.filter_track)
         self.editor.set_play_position(0.0)
         self.editor.scroll_x = 0.0
+        self._refresh_timeline_reference()
+        self._sync_audio_ui()
         self.editor.update()
 
         self._project_path = path
@@ -2298,6 +2801,8 @@ class MainWindow(QMainWindow):
         self.refresh_track_combo()
         self.editor.bpm = self.midi.bpm
         self.editor.selected_notes = []
+
+        self._refresh_timeline_reference()
 
         self.editor.update_timeline()
 
@@ -2464,14 +2969,39 @@ class MainWindow(QMainWindow):
         self._analysis_token += 1
         self._analysis_ready = False
         self._analysis_error = None
+        self._pending_audio_duration = None
+        self._pending_tempo_analysis = None
+        self._pending_tap_onsets = None
+        self._tempo_analyzed = False
 
-        self.audio.clear()
+        active_index = self._active_track_index()
 
-        self.editor.clear_audio()
+        if active_index is not None:
+            if (
+                0 <= active_index <
+                len(self.midi.tracks)
+            ):
+                track = self.midi.tracks[active_index]
+                track.audio_file = ""
+                track.audio_params = {}
 
-        self.offset_box.blockSignals(True)
-        self.offset_box.setValue(0.0)
-        self.offset_box.blockSignals(False)
+            ta = self.track_audio.pop(active_index, None)
+
+            if ta is not None:
+                ta.clear()
+                ta.close()
+
+            self.audio = self._global_audio
+
+            self.editor.set_audio(self._global_audio)
+        else:
+            self.audio.clear()
+
+            self.editor.clear_audio()
+
+        self._refresh_timeline_reference()
+
+        self._sync_audio_ui()
 
         self.update_title()
 
@@ -2511,95 +3041,37 @@ class MainWindow(QMainWindow):
             return
         
         a4_freq = val
-        self.audio.a4_freq = a4_freq
 
         try:
-            self._analysis_token += 1
-            token = self._analysis_token
-            self._analysis_ready = False
-            self._analysis_error = None
-            self._pending_audio_duration = None
-            self._pending_tempo_analysis = None
-            self._pending_tap_onsets = None
-    
-            # A loaded MIDI already supplies the authoritative tempo map.
-            analyze_tempo = not self.midi.has_file
-
-            self.audio.clear()
-            self.editor.clear_audio()
-            self.editor._spectrum_image = None
-            self.editor._spectrum_key = None
-
-            def worker():
-                try:
-                    duration = self.audio.load(path)
-                    if token != self._analysis_token:
-                        return
-
-                    self._pending_audio_duration = duration
-
-                    self.spectrum.analyze(
-                        self.audio.y_mono,
-                        self.audio.sr,
-                        self.editor.min_pitch,
-                        self.editor.max_pitch,
-                        self.audio.a4_freq
-                    )
-
-                    if analyze_tempo:
-                        try:
-                            tempo_result = self.spectrum.analyze_tempo(
-                                self.audio.y_mono,
-                                self.audio.sr
-                            )
-                        except Exception:
-                            tempo_result = None
-
-                        if token == self._analysis_token:
-                            self._pending_tempo_analysis = tempo_result
-
-                    if token != self._analysis_token:
-                        return
-
-                    try:
-                        from module.taptempo import compute_onset_envelope
-                        onset_times, onset_strengths = compute_onset_envelope(
-                            self.audio.y_mono,
-                            self.audio.sr
-                        )
-                    except Exception:
-                        onset_times, onset_strengths = [], []
-
-                    if token == self._analysis_token:
-                        self._pending_tap_onsets = (onset_times, onset_strengths)
-                    if token == self._analysis_token:
-                        self._analysis_ready = True
-                except Exception as e:
-                    if token == self._analysis_token:
-                        self._analysis_error = e
-                        self._analysis_ready = True
-
-            progress = QProgressDialog(
-                tr("オーディオとスペクトラムを解析中...", "Analyzing audio and spectrum..."),
-                tr("キャンセル", "Cancel"), 0, 0, self
+            # 「すべてのトラック」選択時は全体トラック用の音声へ、
+            # 単一トラック選択時はそのトラック専用の音声へ読み込む。
+            track_index = self.midi.filter_track
+            is_track_audio = (
+                track_index is not None and
+                0 <= track_index < len(self.midi.tracks)
             )
-            progress.setWindowTitle(tr("オーディオを開く", "Open Audio"))
-            progress.setWindowModality(Qt.WindowModal)
-            progress.setCancelButton(None)
-            progress.show()
 
-            thread = threading.Thread(
-                target=worker,
-                daemon=True
+            if is_track_audio:
+                audio = self._ensure_track_audio(track_index)
+            else:
+                audio = self._global_audio
+
+            audio.a4_freq = a4_freq
+
+            self._load_audio_into(
+                audio,
+                path,
+                tr("オーディオを開く", "Open Audio")
             )
-            thread.start()
 
-            while not self._analysis_ready and thread.is_alive():
-                QApplication.processEvents()
-                time.sleep(0.01)
+            if is_track_audio:
+                track = self.midi.tracks[track_index]
+                track.audio_file = path
+                track.audio_params = self._collect_audio_params(
+                    audio
+                )
 
-            progress.close()
-            self.update_title()
+            self._apply_audio_context()
             self.update_editor()
             self.editor.set_play_position(0.0)
             self.editor.scroll_x = 0.0
@@ -2681,17 +3153,26 @@ class MainWindow(QMainWindow):
 
             self.midi.clear_history()
 
+            for ta in self.track_audio.values():
+                ta.clear()
+                ta.close()
+            self.track_audio.clear()
+            self.track_audio = {}
 
+            self.audio = self._global_audio
+            self.editor.set_audio(self._global_audio)
 
             self.editor.set_track_filter(
                 0
             )
 
             self.refresh_track_combo()
+            self._tempo_analyzed = False
 
             self.editor.set_play_position(0.0)
             self.audio.position = 0.0
             self.editor.scroll_x = 0.0
+            self._refresh_timeline_reference()
             self.editor.update_timeline()
             self.editor.update()
             self._project_path = None
@@ -2850,6 +3331,8 @@ class MainWindow(QMainWindow):
                     self._pending_tempo_analysis = None
 
                     self.midi.set_base_tempo(bpm)
+
+                    self._tempo_analyzed = True
 
                     # グリッドの拍1が必ず開始位置(0秒)に来るようにする。
                     # 開始位置より前に拍が読めるグリッドを作らない。

@@ -6,6 +6,7 @@ from PySide6.QtWidgets import QWidget, QDialog, QSpinBox, QDoubleSpinBox, QCheck
 from PySide6.QtCore import Qt, QPointF, QRectF, Signal, QTimer
 from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont, QKeySequence, QImage, QPixmap
 from .midi import PedalEvent
+from .spectrum import SpectrumData
 from .taptempo import TapTempoEngine, MIN_TAPS_FOR_APPLY
 from .i18n import tr
 from .features import ENABLE_LYRICS
@@ -30,6 +31,10 @@ class PianoRoll(QWidget):
         self.audio = audio
         self.spectrum = spectrum
         self.midi = midi
+
+        audio.spectrum = spectrum
+
+        self._external_timeline_end = 0.0
 
         self.audio.set_midi(
             self.midi
@@ -228,6 +233,43 @@ class PianoRoll(QWidget):
 
         self.update()
 
+    def set_audio(
+        self,
+        audio
+    ):
+        if self.audio is audio:
+            return
+
+        position = self.play_position
+
+        self.audio.stop()
+
+        self.audio = audio
+
+        self.audio.set_midi(self.midi)
+
+        if getattr(audio, "spectrum", None) is None:
+            audio.spectrum = SpectrumData()
+
+        self.spectrum = audio.spectrum
+
+        self._spectrum_key = None
+        self._spectrum_image = None
+        self._spectrum_level_key = None
+        self._spectrum_hop_dt = 0.0
+
+        self.update_timeline()
+
+        self.audio.position = position
+
+        self.set_play_position(position)
+
+        self.follow_play_position(
+            force=True
+        )
+
+        self.update()
+
     def clear_audio(
         self
     ):
@@ -332,10 +374,39 @@ class PianoRoll(QWidget):
         self.update()
 
     def update_timeline(self):
-        self.audio_duration = max(
-            self.audio.timeline_duration(),
-            300.0 if self.audio.y is None else 1.0
+        tl = self.audio.timeline_duration()
+
+        ref = self._external_timeline_end or 0.0
+
+        if self.audio.y is None:
+            self.audio_duration = max(
+                tl,
+                ref,
+                300.0
+            )
+        else:
+            self.audio_duration = max(
+                tl,
+                ref,
+                1.0
+            )
+
+        self.audio.set_playback_end(
+            self.audio_duration
         )
+
+    def set_timeline_reference_end(self, duration):
+        value = max(
+            0.0,
+            duration or 0.0
+        )
+
+        if value != self._external_timeline_end:
+            self._external_timeline_end = value
+
+            self.update_timeline()
+
+            self.update()
 
     def note_duration(self, start_time=None):
         bpm = self.midi.tempo_at(
@@ -2535,9 +2606,6 @@ class PianoRoll(QWidget):
                 self.midi._bump()
                 if self.audio.playing:
                     self.audio.invalidate_midi_cache()
-            
-            # 操作が終わったら選択状態を消す
-            self._clear_selection()
 
         self.drag_note = None
         self.drag_mode = None

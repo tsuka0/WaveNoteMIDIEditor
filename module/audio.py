@@ -71,6 +71,7 @@ class AudioData:
 
         self.output_device = "internal"
         self._midi_out = None
+        self._midi_out_name = None
         self._midi_out_preview_pitch = None
         self._midi_lock = threading.RLock()
 
@@ -92,6 +93,10 @@ class AudioData:
         self.file_path = None
         self._midi_cache_dirty = False
         self._midi_cache_version = 0
+
+        self.spectrum = None
+
+        self._playback_end = None
 
     @property
     def a4_freq(self):
@@ -128,12 +133,15 @@ class AudioData:
             if self._midi_out is not None:
                 return True
 
-            device = midiout.MidiOutDevice()
+            device = midiout.shared_manager.acquire(
+                self.output_device
+            )
 
-            if not device.open(self.output_device):
+            if device is None:
                 return False
 
             self._midi_out = device
+            self._midi_out_name = self.output_device
             self._send_tuning_to_midi_out()
             return True
 
@@ -142,12 +150,13 @@ class AudioData:
             if self._midi_out is None:
                 return
 
-            try:
-                self._midi_out.close()
-            except Exception:
-                pass
+            midiout.shared_manager.release(
+                self._midi_out_name,
+                self._midi_out
+            )
 
             self._midi_out = None
+            self._midi_out_name = None
             self._midi_out_preview_pitch = None
 
     def _silence_midi_out(self):
@@ -257,9 +266,25 @@ class AudioData:
         return self._tl_duration
 
     def max_position(self):
+        end = self._playback_end
+
+        if end is not None and end > 0.0:
+            return end
+
         return max(
             0.0,
             self.timeline_duration()
+        )
+
+    def set_playback_end(self, seconds):
+        """再生を継続できる共通の終了位置(共有タイムラインの長さ)を設定する。
+
+        ロードされた音声ファイルの範囲を超えても再生を続けるために、
+        エディタのタイムライン全体の長さを基準にする。
+        """
+        self._playback_end = max(
+            0.0,
+            seconds or 0.0
         )
 
     def play(self):

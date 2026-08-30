@@ -1,4 +1,5 @@
 import ctypes
+import threading
 import time
 from ctypes import wintypes
 
@@ -200,3 +201,58 @@ class MidiOutDevice:
 
         self._handle = None
         self._active.clear()
+
+
+class MidiOutManager:
+    """複数のAudioDataインスタンスで1つのMIDI出力デバイスを共有する。
+
+    OmniMIDIのような仮想MIDIデバイスは同時に1つのクライアントしか
+    開けないことがある。トラックごとのAudioDataが独自のハンドルを開くと
+    2つ目のmidiOutOpenが失敗してデバイスを開けなくなるため、ここで
+    デバイス名ごとに1つのハンドルを参照カウントで共有する。
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._devices = {}
+
+    def acquire(self, name):
+        device = None
+        with self._lock:
+            entry = self._devices.get(name)
+            if entry is None:
+                device = MidiOutDevice()
+                if not device.open(name):
+                    return None
+                self._devices[name] = [device, 1]
+                return device
+            entry[1] += 1
+            return entry[0]
+
+    def release(self, name, device):
+        with self._lock:
+            entry = self._devices.get(name)
+            if entry is None:
+                return
+            if entry[0] is not device:
+                return
+            entry[1] -= 1
+            if entry[1] <= 0:
+                try:
+                    entry[0].close()
+                except Exception:
+                    pass
+                del self._devices[name]
+
+    def close_all(self):
+        with self._lock:
+            devices = list(self._devices.values())
+            self._devices.clear()
+        for entry in devices:
+            try:
+                entry[0].close()
+            except Exception:
+                pass
+
+
+shared_manager = MidiOutManager()
