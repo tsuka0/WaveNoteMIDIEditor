@@ -10,6 +10,7 @@ from .spectrum import SpectrumData
 from .taptempo import TapTempoEngine, MIN_TAPS_FOR_APPLY
 from .i18n import tr
 from .features import ENABLE_LYRICS
+from module.settings import load_value
 
 class PianoRoll(QWidget):
     marker_edited = Signal()
@@ -26,6 +27,10 @@ class PianoRoll(QWidget):
 
         self.setMouseTracking(
             True
+        )
+
+        self.setFocusPolicy(
+            Qt.WheelFocus
         )
 
         self.audio = audio
@@ -45,6 +50,9 @@ class PianoRoll(QWidget):
 
         self.bpm = self.midi.bpm
 
+        self.grid_fineness = load_value("grid_fineness", "1.0")
+        if self.grid_fineness == "auto":
+            self.grid_fineness = "1.0"
         self.note_length = 1.0
 
         self.note_lengths = [
@@ -4412,10 +4420,17 @@ class PianoRoll(QWidget):
             if se <= ss:
                 continue
 
-            unit = self.midi.bar_length_beats(
-                1,
-                den
-            )
+            fineness = str(self.grid_fineness)
+            if fineness == "1.0":
+                unit = 1.0
+            elif fineness == "0.5":
+                unit = 0.5
+            elif fineness == "0.25":
+                unit = 0.25
+            else:
+                unit = 1.0
+                
+            unit *= (4.0 / den)
 
             segments.append(
                 (

@@ -115,11 +115,11 @@ def delete_value(name):
     _qsettings().remove(name)
 
 
-def load_last_dir(default=""):
+def load_last_dir(default="", key="last_open_dir"):
     """最後にファイルを開いた/保存したフォルダを返す。
     無効な場合は default を返す。"""
     path = load_value(
-        "last_open_dir",
+        key,
         ""
     )
 
@@ -129,13 +129,13 @@ def load_last_dir(default=""):
     return default
 
 
-def save_last_dir_from_path(path):
+def save_last_dir_from_path(path, key="last_open_dir"):
     directory = os.path.dirname(
         os.path.abspath(str(path))
     )
 
     if directory:
         save_value(
-            "last_open_dir",
+            key,
             directory
         )

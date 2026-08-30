@@ -446,6 +446,18 @@ class AudioData:
             zi_high = scipy.signal.lfilter_zi(self.b_high, self.a_high)
             zi_high = np.vstack((zi_high, zi_high)).T
 
+            # EQ適用時はフィルタの初期状態(ゼロからではなく定常状態として
+            # 開始するlfilter_zi)によって最初の数サンプルに過渡的なクリックが
+            # 発生するため、最初のブロック冒頭を短くフェードインして
+            # プツッというノイズを防ぐ。
+            fade_len = min(
+                int(sample_rate * 0.01),
+                block_size
+            )
+            fade_ramp = np.linspace(
+                0.0, 1.0, fade_len, dtype=np.float32
+            )
+
             if gen != self._play_gen:
                 return
 
@@ -605,6 +617,9 @@ class AudioData:
                         (ahead - max_ahead) /
                         sample_rate
                     )
+
+                if sample_position == 0 and fade_len > 1:
+                    block[:fade_len] *= fade_ramp[:, np.newaxis]
 
                 stream.write(block)
 

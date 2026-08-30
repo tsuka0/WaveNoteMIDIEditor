@@ -331,13 +331,38 @@ class SettingsDialog(QDialog):
         if lang_index >= 0:
             self.lang_combo.setCurrentIndex(lang_index)
 
+        self.grid_combo = QComboBox()
+        self.grid_combo.addItem(tr("4分音符", "Quarter note"), "1.0")
+        self.grid_combo.addItem(tr("8分音符", "Eighth note"), "0.5")
+        self.grid_combo.addItem(tr("16分音符", "16th note"), "0.25")
+        
+        current_grid = load_value("grid_fineness", "1.0")
+        if current_grid == "auto":
+            current_grid = "1.0"
+            
+        grid_idx = self.grid_combo.findData(current_grid)
+        if grid_idx >= 0:
+            self.grid_combo.setCurrentIndex(grid_idx)
+
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItem(tr("PCに合わせる", "Match System"), "auto")
+        self.theme_combo.addItem(tr("白 (Light)", "Light"), "light")
+        self.theme_combo.addItem(tr("黒 (Dark)", "Dark"), "dark")
+        
+        current_theme = load_value("theme", "auto")
+        theme_idx = self.theme_combo.findData(current_theme)
+        if theme_idx >= 0:
+            self.theme_combo.setCurrentIndex(theme_idx)
+
         form = QFormLayout()
+        form.addRow(tr("テーマ", "Theme"), self.theme_combo)
         form.addRow(tr("言語", "Language"), self.lang_combo)
         form.addRow(tr("MIDI出力", "MIDI Output"), self._device_combo)
         form.addRow("", refresh_button)
         form.addRow(tr("バックアップ", "Backup"), self.backup_cb)
         form.addRow(tr("間隔", "Interval"), self.backup_spin)
         form.addRow("Discord", self.discord_cb)
+        form.addRow(tr("グリッドの細かさ", "Grid Fineness"), self.grid_combo)
         form.addRow(tr("ショートカット", "Shortcuts"), self.shortcut_btn)
 
         buttons = QDialogButtonBox(
@@ -374,6 +399,8 @@ class SettingsDialog(QDialog):
         save_value("auto_backup_enabled", "1" if self.backup_cb.isChecked() else "0")
         save_value("auto_backup_interval", str(self.backup_spin.value()))
         save_value("discord_rpc_enabled", "1" if self.discord_cb.isChecked() else "0")
+        save_value("grid_fineness", self.grid_combo.currentData())
+        save_value("theme", self.theme_combo.currentData())
         super().accept()
 
     def language_changed(self):
@@ -1612,6 +1639,18 @@ class MainWindow(QMainWindow):
             )
 
         self.update_discord_rpc()
+        self.editor.grid_fineness = load_value("grid_fineness", "1.0")
+        if self.editor.grid_fineness == "auto":
+            self.editor.grid_fineness = "1.0"
+        self.editor.update()
+
+        theme = load_value("theme", "auto")
+        if theme == "light":
+            QApplication.instance().styleHints().setColorScheme(Qt.ColorScheme.Light)
+        elif theme == "dark":
+            QApplication.instance().styleHints().setColorScheme(Qt.ColorScheme.Dark)
+        else:
+            QApplication.instance().styleHints().setColorScheme(Qt.ColorScheme.Unknown)
 
     def refresh_track_combo(self):
         self.track_combo.blockSignals(True)
@@ -1769,37 +1808,37 @@ class MainWindow(QMainWindow):
 
         self.offset_box.blockSignals(True)
         self.offset_box.setValue(
-            audio.offset or 0.0
+            audio.offset if audio.offset is not None else 0.0
         )
         self.offset_box.blockSignals(False)
 
         self.volume_slider.blockSignals(True)
         self.volume_slider.setValue(
-            int((audio.volume or 0.5) * 100)
+            int((audio.volume if audio.volume is not None else 0.5) * 100)
         )
         self.volume_slider.blockSignals(False)
 
         self.channel_combo.blockSignals(True)
         self.channel_combo.setCurrentIndex(
-            audio.channel_mode or 0
+            audio.channel_mode if audio.channel_mode is not None else 0
         )
         self.channel_combo.blockSignals(False)
 
         self.eq_low_slider.blockSignals(True)
         self.eq_low_slider.setValue(
-            int((audio.eq_low or 1.0) * 100)
+            int((audio.eq_low if audio.eq_low is not None else 1.0) * 100)
         )
         self.eq_low_slider.blockSignals(False)
 
         self.eq_mid_slider.blockSignals(True)
         self.eq_mid_slider.setValue(
-            int((audio.eq_mid or 1.0) * 100)
+            int((audio.eq_mid if audio.eq_mid is not None else 1.0) * 100)
         )
         self.eq_mid_slider.blockSignals(False)
 
         self.eq_high_slider.blockSignals(True)
         self.eq_high_slider.setValue(
-            int((audio.eq_high or 1.0) * 100)
+            int((audio.eq_high if audio.eq_high is not None else 1.0) * 100)
         )
         self.eq_high_slider.blockSignals(False)
 
@@ -2527,7 +2566,7 @@ class MainWindow(QMainWindow):
             return False
 
         self._project_path = path
-        save_last_dir_from_path(path)
+        save_last_dir_from_path(path, key="last_project_dir")
         self._mark_project_saved()
         return True
 
@@ -2540,7 +2579,7 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getSaveFileName(
             self,
             "プロジェクトを保存",
-            load_last_dir(),
+            load_last_dir(key="last_project_dir"),
             "WaveNote Project (*.wnp);;All Files (*)"
         )
 
@@ -2565,7 +2604,7 @@ class MainWindow(QMainWindow):
             )
             return
 
-        save_last_dir_from_path(path)
+        save_last_dir_from_path(path, key="last_project_dir")
 
         try:
             project = read_project_json(path)
@@ -3091,7 +3130,7 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(
             self,
             tr("プロジェクトを開く", "Open Project"),
-            load_last_dir(),
+            load_last_dir(key="last_project_dir"),
             "WaveNote Project (*.wnp);;All Files (*)"
         )
 
@@ -3419,6 +3458,14 @@ if __name__ == "__main__":
     app.setStyle(
         "Fusion"
     )
+
+    theme = load_value("theme", "auto")
+    if theme == "light":
+        app.styleHints().setColorScheme(Qt.ColorScheme.Light)
+    elif theme == "dark":
+        app.styleHints().setColorScheme(Qt.ColorScheme.Dark)
+    else:
+        app.styleHints().setColorScheme(Qt.ColorScheme.Unknown)
 
     initial_file = sys.argv[1] if len(sys.argv) > 1 else None
     window = MainWindow(initial_file=initial_file)
