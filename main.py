@@ -2690,6 +2690,10 @@ class MainWindow(QMainWindow):
                 )
             track.pedals.sort(key=lambda e: e.time)
 
+        # トラック毎に固有のMIDIチャンネルを割り当て、
+        # CC64(サステイン)がトラック間で共有されないようにする
+        self.midi.ensure_unique_channels()
+
         # フィルタトラックの復元
         filter_track = project.get("midi_filter_track")
         if filter_track is not None and 0 <= filter_track < len(self.midi.tracks):

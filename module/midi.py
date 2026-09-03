@@ -298,8 +298,6 @@ class MidiData:
         events.sort(key=lambda e: e.time)
 
         self._bump()
-        if self.filter_track is None and track_index == 0:
-            self.sync_pedals(0)
 
         return ev
 
@@ -315,8 +313,6 @@ class MidiData:
                 else:
                     events.remove(ev)
                 self._bump()
-                if self.filter_track is None and track_index == 0:
-                    self.sync_pedals(0)
                 return ev if ev.down else None
 
         down = not self.pedal_state_at(
@@ -330,8 +326,6 @@ class MidiData:
         events.sort(key=lambda e: e.time)
 
         self._bump()
-        if self.filter_track is None and track_index == 0:
-            self.sync_pedals(0)
 
         return ev
 
@@ -360,8 +354,6 @@ class MidiData:
             events.sort(key=lambda e: e.time)
 
         self._bump()
-        if self.filter_track is None and track_index == 0:
-            self.sync_pedals(0)
 
     def remove_pedal(self, track_index, time):
         events = self.tracks[track_index].pedals
@@ -377,18 +369,8 @@ class MidiData:
 
         if removed:
             self._bump()
-            if self.filter_track is None and track_index == 0:
-                self.sync_pedals(0)
 
         return bool(removed)
-
-    def sync_pedals(self, source_track_index):
-        source_pedals = self.tracks[source_track_index].pedals
-        for i, track in enumerate(self.tracks):
-            if i == source_track_index:
-                continue
-            track.pedals = [PedalEvent(ev.time, ev.down) for ev in source_pedals]
-        self._bump()
 
     def _sustain_extended_notes(self, notes, pairs):
         if not pairs:
@@ -490,13 +472,47 @@ class MidiData:
             )
         )
 
+    def _next_free_channel(self, used):
+        for ch in range(16):
+            if ch != 9 and ch not in used:
+                return ch
+        return 0
+
+    def ensure_unique_channels(self):
+        """各トラックに固有のMIDIチャンネルを割り当てる。
+
+        CC64(サステインペダル)はMIDIチャンネル単位で効くため、
+        トラック同士が同じチャンネルを共有していると、
+        あるトラックでペダルを踏んだ時に他のトラックのノートまで
+        鳴り続けてしまう。トラック毎に独立したチャンネルを持たせることで、
+        ペダルをトラック毎に分離する。
+        """
+        used = set()
+
+        for i, track in enumerate(self.tracks):
+            ch = track.channel
+
+            if not isinstance(ch, int) or not (0 <= ch < 16) or ch == 9 or ch in used:
+                ch = self._next_free_channel(used)
+                track.channel = ch
+
+            used.add(ch)
+
+            for note in track.notes:
+                note.channel = ch
+
     def add_track(self, name=None):
         track = Track(
             name or tr(f"トラック {len(self.tracks) + 1}", f"Track {len(self.tracks) + 1}")
         )
 
-        if self.filter_track is None and self.tracks:
-            track.pedals = [PedalEvent(ev.time, ev.down) for ev in self.tracks[0].pedals]
+        track.channel = self._next_free_channel(
+            {
+                t.channel
+                for t in self.tracks
+                if isinstance(t.channel, int) and 0 <= t.channel < 16 and t.channel != 9
+            }
+        )
 
         self.tracks.append(track)
 
@@ -1053,7 +1069,7 @@ class MidiData:
                 note.duration,
                 max(0, min(127, note.pitch + pitch_offset)),
                 note.velocity,
-                getattr(note, 'channel', track.channel),
+                track.channel,
                 getattr(note, 'lyric', "")
             )
             new_note._original_track = t_idx
@@ -1290,23 +1306,10 @@ class MidiData:
 
             current_tick = 0
 
-            track_channel = getattr(track, "channel", export_channel)
-
-            # ノートが出力に使うチャンネルを決定する:
-            # - トラックの設定と異なるチャンネルを持つノーツはそのチャンネルを
-            #   尊重する(1トラック内の複数チャンネルデータを保護)
-            # - それ以外はトラックに割り当てられたチャンネルを使用する
-            def resolve_note_channel(payload):
-                ch = getattr(payload, "channel", None)
-
-                if (
-                    not isinstance(ch, int) or
-                    not (0 <= ch <= 15) or
-                    ch == track_channel
-                ):
-                    return export_channel
-
-                return ch
+            # トラックに割り当てられた固有チャンネルで出力する。
+            # ノート個別のチャンネルは無視する
+            # (別トラックからペーストしたノートが元トラックのチャンネルを
+            #  引き継いで、複数トラックが同じチャンネルに混ざるのを防ぐ)
 
             for tick, event_type, payload in events:
                 delta = max(
@@ -1322,7 +1325,7 @@ class MidiData:
                             "note_on",
                             note=max(0, min(127, payload.pitch)),
                             velocity=max(0, min(127, payload.velocity)),
-                            channel=resolve_note_channel(payload),
+                            channel=export_channel,
                             time=delta
                         )
                     )
@@ -1346,7 +1349,7 @@ class MidiData:
                             "note_off",
                             note=max(0, min(127, payload.pitch)),
                             velocity=0,
-                            channel=resolve_note_channel(payload),
+                            channel=export_channel,
                             time=delta
                         )
                     )
@@ -1873,6 +1876,8 @@ class MidiData:
         self.beat_phase = 0.0
         self.has_file = True
 
+        self.ensure_unique_channels()
+
         self.sort()
         self.extra_state = {}
         self._refresh_caches()
@@ -2104,6 +2109,8 @@ class MidiData:
         self.tracks = new_tracks
         self.filter_track = 0
         self.has_file = True
+
+        self.ensure_unique_channels()
 
         self.sort()
         self.extra_state = {}

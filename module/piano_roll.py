@@ -1485,8 +1485,10 @@ class PianoRoll(QWidget):
 
             pedal_hit = None
             if note is None and y >= lane_top + self.velocity_lane_height and y < lane_top + self.velocity_lane_height + self.pedal_lane_height:
-                events = self.midi.tracks[self.midi.active_track()].pedals
-                pedal_hit = self._pedal_event_at(events, x)
+                pedal_hit = self._pedal_event_in_track(
+                    self._pedal_target_track(y),
+                    x
+                )
 
             if pedal_hit is not None:
                 self.last_selection_time_range = (pedal_hit.time - 0.001, pedal_hit.time + 0.001)
@@ -2723,10 +2725,8 @@ class PianoRoll(QWidget):
                 self.pedal_lane_height
             ):
                 if (
-                    self._pedal_event_at(
-                        self.midi.tracks[
-                            self.midi.active_track()
-                        ].pedals,
+                    self._pedal_event_in_track(
+                        self._pedal_target_track(y),
                         x
                     ) is not None
                 ):
@@ -3063,13 +3063,11 @@ class PianoRoll(QWidget):
         if has_range:
             if getattr(self, "last_selection_in_pedal", False):
                 t1, t2 = self.last_selection_time_range
-                track_idx = self.midi.active_track()
-                events = self.midi.tracks[track_idx].pedals
-                removed = [ev for ev in events if t1 <= ev.time <= t2]
-                for ev in removed:
-                    events.remove(ev)
-                if removed and self.midi.filter_track is None and track_idx == 0:
-                    self.midi.sync_pedals(0)
+                for t_idx in self._pedal_track_indices():
+                    events = self.midi.tracks[t_idx].pedals
+                    removed = [ev for ev in events if t1 <= ev.time <= t2]
+                    for ev in removed:
+                        events.remove(ev)
             self.last_selection_time_range = None
             self.last_selection_in_pedal = False
 
@@ -3666,6 +3664,41 @@ class PianoRoll(QWidget):
         self.update_timeline()
         self.update()
 
+    def _pedal_track_indices(self):
+        if self.midi.filter_track is None:
+            return list(
+                range(len(self.midi.tracks))
+            )
+        return [self.midi.active_track()]
+
+    def _pedal_lane_top(self):
+        return (
+            self.height() -
+            self.bottom_height +
+            self.velocity_lane_height
+        )
+
+    def _pedal_target_track(self, y):
+        tracks = self._pedal_track_indices()
+
+        if len(tracks) <= 1:
+            return tracks[0]
+
+        lane_top = self._pedal_lane_top()
+        band = (
+            (y - lane_top) /
+            max(1.0, self.pedal_lane_height)
+        )
+        idx = int(band * len(tracks))
+        idx = min(len(tracks) - 1, max(0, idx))
+        return tracks[idx]
+
+    def _pedal_event_in_track(self, track_index, x):
+        return self._pedal_event_at(
+            self.midi.tracks[track_index].pedals,
+            x
+        )
+
     def _pedal_press(
         self,
         event,
@@ -3675,7 +3708,9 @@ class PianoRoll(QWidget):
         self.pedal_drag = None
         self._pedal_undo_pushed = False
 
-        track_index = self.midi.active_track()
+        track_index = self._pedal_target_track(
+            y
+        )
 
         events = self.midi.tracks[
             track_index
@@ -3707,6 +3742,7 @@ class PianoRoll(QWidget):
                     self.pedal_drag = {
                         "mode": "move_multiple",
                         "events": selected_events,
+                        "track": track_index,
                         "press_time": self.x_to_time(x),
                         "changed": False,
                         "original_times": {id(ev): ev.time for ev in selected_events},
@@ -3724,6 +3760,7 @@ class PianoRoll(QWidget):
                     self.pedal_drag = {
                         "mode": "move",
                         "event": new_ev,
+                        "track": track_index,
                         "press_time": new_ev.time,
                         "changed": False,
                         "grid": grid
@@ -3735,6 +3772,7 @@ class PianoRoll(QWidget):
                 self.midi.toggle_pedal(track_index, t)
                 self.pedal_drag = {
                     "mode": "paint",
+                    "track": track_index,
                     "last": t,
                     "press_t": t,
                     "changed": True
@@ -3752,6 +3790,7 @@ class PianoRoll(QWidget):
             else:
                 self.pedal_drag = {
                     "mode": "erase",
+                    "track": track_index,
                     "x0": x
                 }
 
@@ -3765,7 +3804,10 @@ class PianoRoll(QWidget):
         if drag is None:
             return
 
-        track_index = self.midi.active_track()
+        track_index = drag.get(
+            "track",
+            self.midi.active_track()
+        )
 
         events = self.midi.tracks[
             track_index
@@ -3890,7 +3932,10 @@ class PianoRoll(QWidget):
         if drag is None:
             return
 
-        track_index = self.midi.active_track()
+        track_index = drag.get(
+            "track",
+            self.midi.active_track()
+        )
 
         if drag["mode"] == "move" and not drag["changed"]:
             if not self._pedal_undo_pushed:
@@ -6681,168 +6726,197 @@ class PianoRoll(QWidget):
             lane_top,
             lane_bottom
         )
+        if self.midi.filter_track is None:
+            track_indices = list(
+                range(len(self.midi.tracks))
+            )
+        else:
+            track_indices = [
+                self.midi.active_track()
+            ]
 
-        track_index = self.midi.active_track()
-
-        events = self.midi.tracks[
-            track_index
-        ].pedals
-
-        events.sort(
-            key=lambda e: e.time
+        track_colors = getattr(
+            self,
+            "track_colors",
+            [(100, 100, 200)]
         )
 
-        for down, up in (
-            self.midi.pedal_pairs(
-                track_index
+        for t_idx in track_indices:
+            track_events = self.midi.tracks[t_idx].pedals
+
+            track_events.sort(
+                key=lambda e: e.time
             )
-        ):
-            x1 = self.time_to_x(down)
-            x2 = self.time_to_x(up)
 
-            if (
-                x2 < self.left_width or
-                x1 > self.width()
-            ):
-                continue
+            rgb = track_colors[
+                t_idx % len(track_colors)
+            ]
 
-            painter.fillRect(
-                int(x1),
-                lane_top,
-                int(x2 - x1),
-                self.pedal_lane_height,
-                QColor(
-                    120,
-                    230,
-                    150,
-                    26
+            for down, up in (
+                self.midi.pedal_pairs(
+                    t_idx
                 )
-            )
+            ):
+                x1 = self.time_to_x(down)
+                x2 = self.time_to_x(up)
 
-            painter.setPen(
-                QPen(
+                if (
+                    x2 < self.left_width or
+                    x1 > self.width()
+                ):
+                    continue
+
+                painter.fillRect(
+                    int(x1),
+                    lane_top,
+                    int(x2 - x1),
+                    self.pedal_lane_height,
                     QColor(
-                        120,
-                        230,
-                        150
-                    ),
-                    2
-                )
-            )
-
-            painter.drawLine(
-                int(x1),
-                lane_top + 2,
-                int(x2),
-                lane_top + 2
-            )
-
-        visible_start = max(0.0, self.scroll_x)
-        visible_end = self.x_to_time(self.width())
-        
-        times = [e.time for e in events]
-        i0 = bisect.bisect_left(times, visible_start - 1.0)
-        i1 = bisect.bisect_right(times, visible_end + 1.0)
-
-        for ev in events[i0:i1]:
-            x = int(
-                self.time_to_x(ev.time)
-            )
-
-            if (
-                x <
-                self.left_width - 6 or
-                x >
-                self.width() + 6
-            ):
-                continue
-
-            is_selected = False
-            if getattr(self, "last_selection_in_pedal", False) and hasattr(self, "last_selection_time_range") and self.last_selection_time_range:
-                t1, t2 = self.last_selection_time_range
-                if t1 <= ev.time <= t2:
-                    is_selected = True
-
-            if is_selected:
-                painter.setBrush(QBrush(QColor(255, 255, 255)))
-                painter.setPen(QPen(QColor(255, 255, 255), 1))
-            elif ev.down:
-                painter.setBrush(
-                    QBrush(
-                        QColor(
-                            120,
-                            230,
-                            150
-                        )
+                        rgb[0],
+                        rgb[1],
+                        rgb[2],
+                        26
                     )
                 )
 
                 painter.setPen(
                     QPen(
                         QColor(
-                            190,
-                            255,
-                            205
+                            rgb[0],
+                            rgb[1],
+                            rgb[2]
                         ),
-                        1
+                        2
                     )
                 )
-            else:
-                painter.setBrush(
-                    QBrush(
-                        QColor(
-                            235,
-                            130,
-                            130
+
+                painter.drawLine(
+                    int(x1),
+                    lane_top + 2,
+                    int(x2),
+                    lane_top + 2
+                )
+
+            visible_start = max(
+                0.0,
+                self.scroll_x
+            )
+            visible_end = self.x_to_time(
+                self.width()
+            )
+
+            times = [
+                e.time
+                for e in track_events
+            ]
+            i0 = bisect.bisect_left(
+                times,
+                visible_start - 1.0
+            )
+            i1 = bisect.bisect_right(
+                times,
+                visible_end + 1.0
+            )
+
+            for ev in track_events[i0:i1]:
+                x = int(
+                    self.time_to_x(ev.time)
+                )
+
+                if (
+                    x <
+                    self.left_width - 6 or
+                    x >
+                    self.width() + 6
+                ):
+                    continue
+
+                is_selected = False
+                if getattr(self, "last_selection_in_pedal", False) and hasattr(self, "last_selection_time_range") and self.last_selection_time_range:
+                    t1, t2 = self.last_selection_time_range
+                    if t1 <= ev.time <= t2:
+                        is_selected = True
+
+                if is_selected:
+                    painter.setBrush(QBrush(QColor(255, 255, 255)))
+                    painter.setPen(QPen(QColor(255, 255, 255), 1))
+                elif ev.down:
+                    painter.setBrush(
+                        QBrush(
+                            QColor(
+                                rgb[0],
+                                rgb[1],
+                                rgb[2]
+                            )
                         )
                     )
-                )
 
-                painter.setPen(
-                    QPen(
-                        QColor(
-                            255,
-                            190,
-                            190
-                        ),
-                        1
+                    painter.setPen(
+                        QPen(
+                            QColor(
+                                min(255, rgb[0] + 70),
+                                min(255, rgb[1] + 70),
+                                min(255, rgb[2] + 70)
+                            ),
+                            1
+                        )
                     )
-                )
+                else:
+                    painter.setBrush(
+                        QBrush(
+                            QColor(
+                                235,
+                                130,
+                                130
+                            )
+                        )
+                    )
 
-            if ev.down:
-                painter.drawPolygon(
-                    [
-                        QPointF(
-                            x,
-                            lane_top + 2
-                        ),
-                        QPointF(
-                            x - 7,
-                            lane_top + 16
-                        ),
-                        QPointF(
-                            x + 7,
-                            lane_top + 16
-                        ),
-                    ]
-                )
-            else:
-                painter.drawPolygon(
-                    [
-                        QPointF(
-                            x,
-                            lane_bottom - 2
-                        ),
-                        QPointF(
-                            x - 7,
-                            lane_bottom - 16
-                        ),
-                        QPointF(
-                            x + 7,
-                            lane_bottom - 16
-                        ),
-                    ]
-                )
+                    painter.setPen(
+                        QPen(
+                            QColor(
+                                255,
+                                190,
+                                190
+                            ),
+                            1
+                        )
+                    )
+
+                if ev.down:
+                    painter.drawPolygon(
+                        [
+                            QPointF(
+                                x,
+                                lane_top + 2
+                            ),
+                            QPointF(
+                                x - 7,
+                                lane_top + 16
+                            ),
+                            QPointF(
+                                x + 7,
+                                lane_top + 16
+                            ),
+                        ]
+                    )
+                else:
+                    painter.drawPolygon(
+                        [
+                            QPointF(
+                                x,
+                                lane_bottom - 2
+                            ),
+                            QPointF(
+                                x - 7,
+                                lane_bottom - 16
+                            ),
+                            QPointF(
+                                x + 7,
+                                lane_bottom - 16
+                            ),
+                        ]
+                    )
 
 
 
