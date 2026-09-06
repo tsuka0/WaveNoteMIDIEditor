@@ -16,6 +16,7 @@ class PianoRoll(QWidget):
     marker_edited = Signal()
     track_switch_requested = Signal(int)
     tap_tempo_applied = Signal(float, float, float)
+    lyric_mode_changed = Signal(bool)
 
     def __init__(
         self,
@@ -255,6 +256,8 @@ class PianoRoll(QWidget):
         self.audio = audio
 
         self.audio.set_midi(self.midi)
+        if hasattr(self.audio, "set_lyric_mode"):
+            self.audio.set_lyric_mode(self.lyric_mode)
 
         if getattr(audio, "spectrum", None) is None:
             audio.spectrum = SpectrumData()
@@ -921,8 +924,14 @@ class PianoRoll(QWidget):
             return
 
         self.lyric_mode = enabled
+        if hasattr(self, "audio") and hasattr(self.audio, "set_lyric_mode"):
+            self.audio.set_lyric_mode(enabled)
         self.unsetCursor()
         self.update()
+        try:
+            self.lyric_mode_changed.emit(enabled)
+        except Exception:
+            pass
 
     def toggle_lyric_mode(self):
         self.set_lyric_mode(not self.lyric_mode)
@@ -1001,12 +1010,17 @@ class PianoRoll(QWidget):
 
                 target.lyric = text
                 self.midi._bump()
+                self.preview_pitch(target.pitch, phoneme=text)
 
             idx += 1
 
         if undo_pushed:
-            if self.audio.playing:
-                self.audio.invalidate_midi_cache()
+            self.audio.invalidate_midi_cache()
+            try:
+                from .voice_library import VoiceLibrary
+                VoiceLibrary.get_instance().prewarm_notes(self.midi.notes, self.audio.sr)
+            except Exception:
+                pass
 
         self.update()
 
@@ -3206,12 +3220,14 @@ class PianoRoll(QWidget):
 
     def preview_pitch(
         self,
-        pitch
+        pitch,
+        phoneme=None
     ):
         self._previewed_pitch = pitch
 
         self.audio.preview_note(
-            pitch
+            pitch,
+            phoneme=phoneme
         )
 
     def _velocity_bars(self):

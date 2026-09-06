@@ -5,6 +5,7 @@ import ctypes
 import gzip
 import threading
 import json
+import traceback
 from pathlib import Path
 
 def get_resource_path(relative_path):
@@ -18,13 +19,46 @@ def get_resource_path(relative_path):
 GZIP_MAGIC = b"\x1f\x8b"
 
 def read_project_json(path):
+    """プロジェクトファイル (.wnp / JSON) を安全に読み込んで辞書データを返す。
+
+    ファイルが存在しない場合、破損している場合、空の場合、JSON構文エラー、
+    または辞書型でないデータの場合に適切な例外を送出します。
+    """
+    if not path:
+        raise ValueError("Project file path is empty.")
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Project file not found: {path}")
+    if os.path.isdir(path):
+        raise IsADirectoryError(f"Specified path is a directory: {path}")
+    if os.path.getsize(path) == 0:
+        raise ValueError(f"Project file is empty (0 bytes): {path}")
+
     with open(path, "rb") as f:
         raw = f.read()
 
-    if raw[:2] == GZIP_MAGIC:
-        raw = gzip.decompress(raw)
+    if len(raw) >= 2 and raw[:2] == GZIP_MAGIC:
+        try:
+            raw = gzip.decompress(raw)
+        except Exception as e:
+            raise ValueError(f"Corrupted compressed project file: {e}") from e
 
-    return json.loads(raw.decode("utf-8"))
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            text = raw.decode("cp932", errors="replace")
+
+    try:
+        data = json.loads(text)
+    except Exception as e:
+        raise ValueError(f"Invalid JSON syntax in project file: {e}") from e
+
+    if not isinstance(data, dict):
+        raise ValueError("Invalid project file format: root object is not a dictionary.")
+
+    return data
 
 from PySide6.QtWidgets import (
     QApplication,
@@ -42,6 +76,7 @@ from PySide6.QtWidgets import (
     QSlider,
     QComboBox,
     QPushButton,
+    QMenu,
     QDialog,
     QDialogButtonBox,
     QVBoxLayout,
@@ -61,10 +96,11 @@ from module.midi import MidiData, Note, PedalEvent
 from module.piano_roll import PianoRoll
 from module import midiout
 from module.midiout import list_ports
-from module.settings import load_value, save_value, delete_value, load_last_dir, save_last_dir_from_path
+from module.settings import load_value, save_value, delete_value, load_last_dir, save_last_dir, save_last_dir_from_path
 from module.i18n import tr, get_language, set_language, LANGUAGES
 from module.discord_rpc import DiscordRPC
 from module.features import ENABLE_LYRICS, ENABLE_SVP
+from module.voice_library import VoiceLibrary
 
 DISCORD_CLIENT_ID = "1539710543751942214"
 
@@ -727,6 +763,9 @@ class MainWindow(QMainWindow):
         self.editor.marker_edited.connect(
             self.after_edit
         )
+        self.editor.lyric_mode_changed.connect(
+            self._on_lyric_mode_changed
+        )
 
         self.actions = {}
         self.create_menu()
@@ -768,9 +807,10 @@ class MainWindow(QMainWindow):
         self.update_discord_rpc()
 
         if initial_file:
-            self.open_file_by_path(initial_file)
+            self.open_file_by_path(initial_file, exit_on_failure=True)
 
         self.update_shortcuts()
+        VoiceLibrary.get_instance().prewarm_notes(self.midi.notes, self.audio.sr)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -923,43 +963,65 @@ class MainWindow(QMainWindow):
                             return
                 self.open_file_by_path(path)
 
-    def open_file_by_path(self, path):
+    def open_file_by_path(self, path, exit_on_failure: bool = False):
         if not path:
-            return
+            return False
         path = str(path).strip().strip('"').strip("'")
         if not os.path.exists(path):
-            QMessageBox.critical(
-                self,
-                tr("エラー", "Error"),
-                tr(f"ファイルが見つかりません:\n{path}", f"File not found:\n{path}")
-            )
-            return
+            error_msg = f"[WaveNote Error] ファイルが見つかりません: {path}"
+            print(error_msg, file=sys.stderr)
+            msg_box = QMessageBox(self)
+            msg_box.setIcon(QMessageBox.Icon.Critical)
+            msg_box.setWindowTitle(tr("エラー", "Error"))
+            msg_box.setText(tr(f"ファイルが見つかりません:\n{path}", f"File not found:\n{path}"))
+            btn_exit = msg_box.addButton(tr("終了", "Exit"), QMessageBox.ButtonRole.DestructiveRole)
+            btn_ok = msg_box.addButton(tr("OK", "OK"), QMessageBox.ButtonRole.AcceptRole)
+            msg_box.setDefaultButton(btn_exit if exit_on_failure else btn_ok)
+            msg_box.exec()
+            if exit_on_failure or msg_box.clickedButton() == btn_exit:
+                if QApplication.instance():
+                    QApplication.instance().exit(1)
+                import os
+                os._exit(1)
+            return False
 
         ext = Path(path).suffix.lower()
         if ext == ".wnp":
-            self.load_project(path)
+            return self.load_project(path, exit_on_failure=exit_on_failure)
         elif ext in (".mid", ".midi") or (
             ENABLE_SVP and ext == ".svp"
         ):
             self.load_midi_file(path)
+            return True
         elif ext in (".wav", ".mp3", ".flac", ".ogg", ".m4a"):
             self.load_audio_file(path)
+            return True
         else:
             try:
                 data = read_project_json(path)
                 if isinstance(data, dict) and ("midi_tracks" in data or "audio_file" in data):
-                    self.load_project(path)
-                    return
+                    return self.load_project(path, exit_on_failure=exit_on_failure)
             except Exception:
                 pass
-            QMessageBox.warning(
-                self,
-                tr("未対応の形式", "Unsupported Format"),
-                tr(
-                    f"サポートされていないファイル形式です:\n{path}",
-                    f"Unsupported file format:\n{path}"
-                )
-            )
+            error_msg = f"[WaveNote Error] サポートされていないファイル形式です: {path}"
+            print(error_msg, file=sys.stderr)
+            msg_box = QMessageBox(self)
+            msg_box.setIcon(QMessageBox.Icon.Warning)
+            msg_box.setWindowTitle(tr("未対応の形式", "Unsupported Format"))
+            msg_box.setText(tr(
+                f"サポートされていないファイル形式です:\n{path}",
+                f"Unsupported file format:\n{path}"
+            ))
+            btn_exit = msg_box.addButton(tr("終了", "Exit"), QMessageBox.ButtonRole.DestructiveRole)
+            btn_ok = msg_box.addButton(tr("OK", "OK"), QMessageBox.ButtonRole.AcceptRole)
+            msg_box.setDefaultButton(btn_exit if exit_on_failure else btn_ok)
+            msg_box.exec()
+            if exit_on_failure or msg_box.clickedButton() == btn_exit:
+                if QApplication.instance():
+                    QApplication.instance().exit(1)
+                import os
+                os._exit(1)
+            return False
 
     def closeEvent(self, event):
         if self.project_is_modified():
@@ -994,6 +1056,24 @@ class MainWindow(QMainWindow):
         midiout.shared_manager.close_all()
         super().closeEvent(event)
 
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.ActivationChange and self.isActiveWindow():
+            vl = VoiceLibrary.get_instance()
+            if vl.folder_path and os.path.isdir(vl.folder_path):
+                old_count = sum(len(p) for p in vl.samples.values())
+                vl.scan_library()
+                new_count = sum(len(p) for p in vl.samples.values())
+                if new_count != old_count:
+                    vl.prewarm_notes(self.midi.notes, self.audio.sr)
+                    self.statusBar().showMessage(
+                        tr(
+                            f"音声ライブラリを更新しました (発音: {len(vl.samples)}, サンプル: {new_count})",
+                            f"Voice library updated (Phonemes: {len(vl.samples)}, Samples: {new_count})"
+                        ),
+                        3000
+                    )
+
     def create_menu(self):
         file_menu = self.menuBar().addMenu(
             tr("ファイル", "File")
@@ -1022,6 +1102,12 @@ class MainWindow(QMainWindow):
         open_audio_action = QAction(tr("オーディオを開く", "Open Audio"), self)
         open_audio_action.triggered.connect(self.open_audio)
 
+        open_voice_lib_action = QAction(tr("音声ライブラリを開く", "Open Voice Library"), self)
+        open_voice_lib_action.triggered.connect(self.open_voice_library)
+
+        select_voice_lib_action = QAction(tr("音声ライブラリフォルダを選択...", "Select Voice Library Folder..."), self)
+        select_voice_lib_action.triggered.connect(self.change_voice_library_dir)
+
         save_action = QAction(tr("MIDI上書き保存", "Overwrite-save MIDI"), self)
         save_action.triggered.connect(self.save_midi)
         
@@ -1036,6 +1122,8 @@ class MainWindow(QMainWindow):
         file_menu.addAction(save_project_action)
         file_menu.addAction(open_midi_action)
         file_menu.addAction(open_audio_action)
+        file_menu.addAction(open_voice_lib_action)
+        file_menu.addAction(select_voice_lib_action)
         file_menu.addAction(save_action)
         file_menu.addAction(save_as_action)
         file_menu.addAction(exit_action)
@@ -1377,6 +1465,30 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(
             self.play_all_tracks_button
         )
+
+        toolbar.addSeparator()
+        spacer_vl = QWidget()
+        spacer_vl.setFixedWidth(6)
+        toolbar.addWidget(spacer_vl)
+
+        self.open_voice_lib_btn = QPushButton(tr("音声ライブラリを開く", "Open Voice Library"))
+        self.open_voice_lib_btn.setToolTip(
+            tr(
+                "原音ライブラリフォルダ (△_○○.wav) を選択して読み込みます。\n"
+                "右クリックで再読み込みやエクスプローラー表示ができます。",
+                "Select and load voice library folder (△_○○.wav).\n"
+                "Right-click to reload or reveal in Explorer."
+            )
+        )
+        self.open_voice_lib_btn.clicked.connect(self.open_voice_library)
+        self.open_voice_lib_btn.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.open_voice_lib_btn.customContextMenuRequested.connect(self._show_voice_lib_menu)
+        toolbar.addWidget(self.open_voice_lib_btn)
+
+        self.voice_lib_label = QLabel()
+        self.voice_lib_label.setStyleSheet("color: #64b5f6; font-size: 11px; margin-left: 4px;")
+        toolbar.addWidget(self.voice_lib_label)
+        self.update_voice_lib_ui()
 
         # --- Audio DSP Toolbar (New Row) ---
         self.addToolBarBreak()
@@ -2377,6 +2489,7 @@ class MainWindow(QMainWindow):
             "audio_eq_mid": getattr(self._global_audio, "eq_mid", 1.0),
             "audio_eq_high": getattr(self._global_audio, "eq_high", 1.0),
             "audio_muted": getattr(self._global_audio, "audio_muted", False),
+            "voice_library_dir": VoiceLibrary.get_instance().folder_path,
         }
 
         for index, track in enumerate(self.midi.tracks):
@@ -2512,8 +2625,8 @@ class MainWindow(QMainWindow):
         if self.windowTitle() != title:
             self.setWindowTitle(title)
 
-    def new_project(self):
-        if self.project_is_modified():
+    def new_project(self, prompt_save: bool = True):
+        if prompt_save and self.project_is_modified():
             answer = QMessageBox.question(
                 self,
                 tr("未保存の変更", "Unsaved Changes"),
@@ -2598,234 +2711,271 @@ class MainWindow(QMainWindow):
 
         return self._save_project_to_path(path)
 
-    def load_project(self, path):
+    def load_project(self, path, exit_on_failure: bool = False):
         path = str(path).strip().strip('"').strip("'")
-        if not os.path.exists(path):
-            QMessageBox.critical(
-                self,
-                tr("エラー", "Error"),
-                tr(
-                    f"プロジェクトファイルが見つかりません:\n{path}",
-                    f"Project file not found:\n{path}"
-                )
-            )
-            return
-
-        save_last_dir_from_path(path, key="last_project_dir")
-
         try:
+            if not path:
+                raise ValueError(tr("プロジェクトファイルのパスが指定されていません。", "Project file path is not specified."))
+
+            if not os.path.exists(path):
+                raise FileNotFoundError(tr(f"プロジェクトファイルが見つかりません:\n{path}", f"Project file not found:\n{path}"))
+
+            if not os.path.isfile(path):
+                raise ValueError(tr(f"指定されたパスはファイルではありません:\n{path}", f"Specified path is not a file:\n{path}"))
+
+            if os.path.getsize(path) == 0:
+                raise ValueError(tr(f"プロジェクトファイルが空です (0バイト):\n{path}", f"Project file is empty (0 bytes):\n{path}"))
+
+            save_last_dir_from_path(path, key="last_project_dir")
+
             project = read_project_json(path)
-        except Exception as e:
-            QMessageBox.critical(
-                self,
-                tr("エラー", "Error"),
-                tr(
-                    f"プロジェクトの読み込みに失敗しました:\n{e}",
-                    f"Failed to load project:\n{e}"
-                )
-            )
-            return
+            if not isinstance(project, dict):
+                raise ValueError(tr("プロジェクトファイルの形式が無効です（ルートデータがJSONオブジェクトではありません）。",
+                                    "Invalid project file format: root content is not a JSON object."))
 
-        # MIDIトラックの再構築
-        self.midi = MidiData()
-        self.midi.play_all_tracks = self.play_all_tracks_button.isChecked()
-        self.midi.tracks.clear()
-        raw_tempos = project.get("midi_tempos", [(0.0, 120.0)])
-        self.midi.tempos = [
-            (float(t[0]), float(t[1])) for t in raw_tempos
-        ] if raw_tempos else [(0.0, 120.0)]
-        self.midi.bpm = float(self.midi.tempos[0][1])
+            # テンポ・拍子の安全な復元
+            new_midi = MidiData()
+            new_midi.play_all_tracks = self.play_all_tracks_button.isChecked()
+            new_midi.tracks.clear()
+            raw_tempos = project.get("midi_tempos", [(0.0, 120.0)])
+            new_midi.tempos = [
+                (float(t[0]), float(t[1])) for t in raw_tempos
+            ] if raw_tempos else [(0.0, 120.0)]
+            new_midi.bpm = float(new_midi.tempos[0][1])
 
-        raw_timesigs = project.get("midi_timesigs", [(0.0, 4, 4)])
-        self.midi.time_signatures = [
-            (float(ts[0]), int(ts[1]), int(ts[2])) for ts in raw_timesigs
-        ] if raw_timesigs else [(0.0, 4, 4)]
+            raw_timesigs = project.get("midi_timesigs", [(0.0, 4, 4)])
+            new_midi.time_signatures = [
+                (float(ts[0]), int(ts[1]), int(ts[2])) for ts in raw_timesigs
+            ] if raw_timesigs else [(0.0, 4, 4)]
 
-        # グリッド原点(タップ計測などで設定される)を復元しないと
-        # 開き直した時にMIDIに対してグリッドがずれる
-        self.midi.beat_phase = float(
-            project.get("midi_beat_phase", 0.0)
-        )
-
-        self.midi.has_file = bool(project.get("midi_tracks"))
-
-        # トラックの再構築
-        for ta in self.track_audio.values():
-            ta.clear()
-            ta.close()
-        self.track_audio.clear()
-        self.track_audio = {}
-
-        self._project_path = path
-        self._tempo_analyzed = False
-
-        for track_data in project.get("midi_tracks", []):
-            track = self.midi.add_track(name=track_data.get("name"))
-            track.channel = track_data.get("channel", len(self.midi.tracks) - 1)
-            track.audio_file = track_data.get("audio_file", "") or ""
-            track.audio_params = dict(
-                track_data.get("audio_params", {}) or {}
-            )
-            for note_data in track_data.get("notes", []):
-                note_kwargs = {
-                    "start": note_data["start"],
-                    "duration": note_data["duration"],
-                    "pitch": note_data["pitch"],
-                    "velocity": note_data.get("velocity", 100),
-                    "channel": note_data.get("channel", track.channel),
-                }
-
-                if ENABLE_LYRICS:
-                    note_kwargs["lyric"] = note_data.get("lyric", "")
-
-                track.notes.append(
-                    Note(**note_kwargs)
-                )
-            for pedal_data in track_data.get("pedals", []):
-                track.pedals.append(
-                    PedalEvent(
-                        time=pedal_data["time"],
-                        down=pedal_data["down"]
-                    )
-                )
-            track.pedals.sort(key=lambda e: e.time)
-
-        # トラック毎に固有のMIDIチャンネルを割り当て、
-        # CC64(サステイン)がトラック間で共有されないようにする
-        self.midi.ensure_unique_channels()
-
-        # フィルタトラックの復元
-        filter_track = project.get("midi_filter_track")
-        if filter_track is not None and 0 <= filter_track < len(self.midi.tracks):
-            self.midi.set_filter_track(filter_track)
-
-        self.midi._bump()
-
-        # 全体トラック用の音声設定の復元
-        project_audio_offset = project.get("audio_offset", 0.0)
-        project_audio_volume = project.get("audio_volume", 0.5)
-        project_audio_a4 = project.get("audio_a4_freq", 440.0)
-        project_audio_channel = project.get("audio_channel", 0)
-        project_audio_eq_low = project.get("audio_eq_low", 1.0)
-        project_audio_eq_mid = project.get("audio_eq_mid", 1.0)
-        project_audio_eq_high = project.get("audio_eq_high", 1.0)
-        project_audio_muted = bool(project.get("audio_muted", False))
-        self._global_audio.clear()
-        self._global_audio.offset = project_audio_offset
-        self._global_audio.volume = project_audio_volume
-        self._global_audio.a4_freq = project_audio_a4
-        self._global_audio.channel_mode = int(project_audio_channel)
-        self._global_audio.eq_low = float(project_audio_eq_low)
-        self._global_audio.eq_mid = float(project_audio_eq_mid)
-        self._global_audio.eq_high = float(project_audio_eq_high)
-        self._global_audio.audio_muted = project_audio_muted
-
-        # エディタにMIDIを設定
-        self.editor.set_midi(self.midi)
-        self._global_audio.set_midi(self.midi)
-
-        # 復元したトラック選択に応じたアクティブな音声へ切り替える。
-        # (トラックに専用音声の登録がある場合はそのトラック専用の
-        #  AudioDataが_ensure_track_audio経由で生成され、パラメータも復元される)
-        target_audio = self._current_audio()
-        self.audio = target_audio
-        self.editor.set_audio(target_audio)
-
-        # 音声ファイルの解決とスペクトラム解析（非同期）
-        if target_audio is self._global_audio:
-            audio_file = project.get("audio_file")
-            restore_params = {
-                "volume": project_audio_volume,
-                "offset": project_audio_offset,
-                "a4": project_audio_a4,
-                "channel": project_audio_channel,
-                "eq_low": project_audio_eq_low,
-                "eq_mid": project_audio_eq_mid,
-                "eq_high": project_audio_eq_high,
-                "muted": project_audio_muted,
-            }
-        else:
-            active_index = self.midi.filter_track
-            audio_file = self.midi.tracks[active_index].audio_file
-            restore_params = (
-                self.midi.tracks[active_index].audio_params or None
+            new_midi.beat_phase = float(
+                project.get("midi_beat_phase", 0.0)
             )
 
-        resolved_audio_file = self._resolve_audio_path(
-            audio_file
-        ) if audio_file else None
+            new_midi.has_file = bool(project.get("midi_tracks"))
 
-        if resolved_audio_file:
-            # 全体トラック用の音声を先に読み込む。
-            # 専用音声のないトラックは全体トラック用の音声を参照するため、
-            # プロジェクトを開いた直後から再生できるようにする。
-            # 作曲テンポの基準も全体トラック用の音声にする。
-            if target_audio is not self._global_audio:
-                global_file = project.get("audio_file")
-                global_resolved = (
-                    self._resolve_audio_path(global_file)
-                    if global_file else None
+            # トラックとノーツの安全な再構築
+            midi_tracks_data = project.get("midi_tracks", [])
+            if midi_tracks_data is not None and not isinstance(midi_tracks_data, list):
+                raise ValueError(tr("プロジェクト内のトラックデータ形式が無効です。", "Invalid track data format in project."))
+
+            for track_data in (midi_tracks_data or []):
+                if not isinstance(track_data, dict):
+                    continue
+                track = new_midi.add_track(name=track_data.get("name"))
+                track.channel = int(track_data.get("channel", len(new_midi.tracks) - 1))
+                track.audio_file = track_data.get("audio_file", "") or ""
+                track.audio_params = dict(
+                    track_data.get("audio_params", {}) or {}
                 )
-                if (
-                    global_resolved and
-                    os.path.abspath(global_resolved) !=
-                    os.path.abspath(resolved_audio_file)
-                ):
-                    global_analyzed_tempo = (
-                        not self.midi.has_file and
-                        not self._tempo_analyzed
-                    )
-                    self._load_audio_into(
-                        self._global_audio,
-                        global_resolved,
-                        tr("プロジェクトを開く", "Open Project"),
-                        restore_params={
-                            "volume": project_audio_volume,
-                            "offset": project_audio_offset,
-                            "a4": project_audio_a4,
-                            "channel": project_audio_channel,
-                            "eq_low": project_audio_eq_low,
-                            "eq_mid": project_audio_eq_mid,
-                            "eq_high": project_audio_eq_high,
-                            "muted": project_audio_muted,
+                notes_data = track_data.get("notes", [])
+                if isinstance(notes_data, list):
+                    for note_data in notes_data:
+                        if not isinstance(note_data, dict):
+                            continue
+                        if "start" not in note_data or "duration" not in note_data or "pitch" not in note_data:
+                            continue
+                        note_kwargs = {
+                            "start": float(note_data["start"]),
+                            "duration": float(note_data["duration"]),
+                            "pitch": int(note_data["pitch"]),
+                            "velocity": int(note_data.get("velocity", 100)),
+                            "channel": int(note_data.get("channel", track.channel)),
                         }
-                    )
-                    if global_analyzed_tempo:
-                        # 全体トラック用の音声がテンポの基準になったので、
-                        # 続いて読み込むトラック専用の音声では上書きしない。
-                        self._tempo_analyzed = True
 
-            self._load_audio_into(
-                target_audio,
-                resolved_audio_file,
-                tr("プロジェクトを開く", "Open Project"),
-                restore_params=restore_params
-            )
-            self.update_editor()
-        else:
-            target_audio.clear()
-            self.editor.clear_audio()
-            self.editor.update_timeline()
-            if audio_file:
-                QMessageBox.warning(
-                    self,
-                    tr("音声ファイルが見つかりません", "Audio File Not Found"),
-                    tr(
-                        f"プロジェクトに登録されている音声ファイルが見つかりませんでした:\n{audio_file}",
-                        f"The audio file registered in the project was not found:\n{audio_file}"
-                    )
+                        if ENABLE_LYRICS:
+                            note_kwargs["lyric"] = str(note_data.get("lyric", ""))
+
+                        track.notes.append(
+                            Note(**note_kwargs)
+                        )
+                pedals_data = track_data.get("pedals", [])
+                if isinstance(pedals_data, list):
+                    for pedal_data in pedals_data:
+                        if isinstance(pedal_data, dict) and "time" in pedal_data and "down" in pedal_data:
+                            track.pedals.append(
+                                PedalEvent(
+                                    time=float(pedal_data["time"]),
+                                    down=bool(pedal_data["down"])
+                                )
+                            )
+                    track.pedals.sort(key=lambda e: e.time)
+
+            new_midi.ensure_unique_channels()
+
+            filter_track = project.get("midi_filter_track")
+            if filter_track is not None and 0 <= int(filter_track) < len(new_midi.tracks):
+                new_midi.set_filter_track(int(filter_track))
+
+            new_midi._bump()
+
+            # トラック音声の再構築
+            for ta in self.track_audio.values():
+                ta.clear()
+                ta.close()
+            self.track_audio.clear()
+            self.track_audio = {}
+
+            self.midi = new_midi
+            self._project_path = path
+            self._tempo_analyzed = False
+
+            # 全体トラック用の音声設定の復元
+            project_audio_offset = float(project.get("audio_offset", 0.0))
+            project_audio_volume = float(project.get("audio_volume", 0.5))
+            project_audio_a4 = float(project.get("audio_a4_freq", 440.0))
+            project_audio_channel = int(project.get("audio_channel", 0))
+            project_audio_eq_low = float(project.get("audio_eq_low", 1.0))
+            project_audio_eq_mid = float(project.get("audio_eq_mid", 1.0))
+            project_audio_eq_high = float(project.get("audio_eq_high", 1.0))
+            project_audio_muted = bool(project.get("audio_muted", False))
+            self._global_audio.clear()
+            self._global_audio.offset = project_audio_offset
+            self._global_audio.volume = project_audio_volume
+            self._global_audio.a4_freq = project_audio_a4
+            self._global_audio.channel_mode = project_audio_channel
+            self._global_audio.eq_low = project_audio_eq_low
+            self._global_audio.eq_mid = project_audio_eq_mid
+            self._global_audio.eq_high = project_audio_eq_high
+            self._global_audio.audio_muted = project_audio_muted
+
+            # 音声ライブラリ設定の復元
+            voice_lib_dir = project.get("voice_library_dir")
+            if voice_lib_dir and os.path.isdir(voice_lib_dir):
+                VoiceLibrary.get_instance().set_folder(voice_lib_dir)
+            VoiceLibrary.get_instance().prewarm_notes(self.midi.notes, self.audio.sr)
+
+            # エディタにMIDIを設定
+            self.editor.set_midi(self.midi)
+            self._global_audio.set_midi(self.midi)
+
+            target_audio = self._current_audio()
+            self.audio = target_audio
+            self.editor.set_audio(target_audio)
+
+            # 音声ファイルの解決とスペクトラム解析（非同期）
+            if target_audio is self._global_audio:
+                audio_file = project.get("audio_file")
+                restore_params = {
+                    "volume": project_audio_volume,
+                    "offset": project_audio_offset,
+                    "a4": project_audio_a4,
+                    "channel": project_audio_channel,
+                    "eq_low": project_audio_eq_low,
+                    "eq_mid": project_audio_eq_mid,
+                    "eq_high": project_audio_eq_high,
+                    "muted": project_audio_muted,
+                }
+            else:
+                active_index = self.midi.filter_track
+                audio_file = self.midi.tracks[active_index].audio_file
+                restore_params = (
+                    self.midi.tracks[active_index].audio_params or None
                 )
 
-        self.refresh_track_combo()
-        self.editor.set_track_filter(self.midi.filter_track)
-        self.editor.set_play_position(0.0)
-        self.editor.scroll_x = 0.0
-        self._refresh_timeline_reference()
-        self._sync_audio_ui()
-        self.editor.update()
+            resolved_audio_file = self._resolve_audio_path(
+                audio_file
+            ) if audio_file else None
 
-        self._project_path = path
-        self._mark_project_saved()
+            if resolved_audio_file:
+                if target_audio is not self._global_audio:
+                    global_file = project.get("audio_file")
+                    global_resolved = (
+                        self._resolve_audio_path(global_file)
+                        if global_file else None
+                    )
+                    if (
+                        global_resolved and
+                        os.path.abspath(global_resolved) !=
+                        os.path.abspath(resolved_audio_file)
+                    ):
+                        global_analyzed_tempo = (
+                            not self.midi.has_file and
+                            not self._tempo_analyzed
+                        )
+                        self._load_audio_into(
+                            self._global_audio,
+                            global_resolved,
+                            tr("プロジェクトを開く", "Open Project"),
+                            restore_params={
+                                "volume": project_audio_volume,
+                                "offset": project_audio_offset,
+                                "a4": project_audio_a4,
+                                "channel": project_audio_channel,
+                                "eq_low": project_audio_eq_low,
+                                "eq_mid": project_audio_eq_mid,
+                                "eq_high": project_audio_eq_high,
+                                "muted": project_audio_muted,
+                            }
+                        )
+                        if global_analyzed_tempo:
+                            self._tempo_analyzed = True
+
+                self._load_audio_into(
+                    target_audio,
+                    resolved_audio_file,
+                    tr("プロジェクトを開く", "Open Project"),
+                    restore_params=restore_params
+                )
+                self.update_editor()
+            else:
+                target_audio.clear()
+                self.editor.clear_audio()
+                self.editor.update_timeline()
+                if audio_file:
+                    QMessageBox.warning(
+                        self,
+                        tr("音声ファイルが見つかりません", "Audio File Not Found"),
+                        tr(
+                            f"プロジェクトに登録されている音声ファイルが見つかりませんでした:\n{audio_file}",
+                            f"The audio file registered in the project was not found:\n{audio_file}"
+                        )
+                    )
+
+            self.refresh_track_combo()
+            self.editor.set_track_filter(self.midi.filter_track)
+            self.editor.set_play_position(0.0)
+            self.editor.scroll_x = 0.0
+            self._refresh_timeline_reference()
+            self._sync_audio_ui()
+            self.editor.update()
+
+            self._project_path = path
+            self._mark_project_saved()
+            return True
+
+        except Exception as e:
+            error_details = traceback.format_exc()
+            error_summary = f"[WaveNote Error] プロジェクトファイルを開けませんでした: {path}\nエラー内容: {e}\n{error_details}"
+            print(error_summary, file=sys.stderr)
+
+            # 破損状態を残さず、エディタを安全に新規プロジェクトへ復元
+            try:
+                self.new_project(prompt_save=False)
+            except Exception:
+                pass
+
+            msg_box = QMessageBox(self)
+            msg_box.setIcon(QMessageBox.Icon.Critical)
+            msg_box.setWindowTitle(tr("エラー", "Error"))
+            msg_box.setText(tr(
+                f"プロジェクトファイルを開けませんでした:\n{path}\n\nエラー内容:\n{e}",
+                f"Failed to open project file:\n{path}\n\nError:\n{e}"
+            ))
+            msg_box.setDetailedText(error_details)
+
+            btn_exit = msg_box.addButton(tr("終了", "Exit"), QMessageBox.ButtonRole.DestructiveRole)
+            btn_continue = msg_box.addButton(tr("新規で続行", "Continue New"), QMessageBox.ButtonRole.AcceptRole)
+            msg_box.setDefaultButton(btn_exit if exit_on_failure else btn_continue)
+
+            msg_box.exec()
+
+            if exit_on_failure or msg_box.clickedButton() == btn_exit:
+                if QApplication.instance():
+                    QApplication.instance().exit(1)
+                import os
+                os._exit(1)
+            return False
 
 
 
@@ -2858,6 +3008,8 @@ class MainWindow(QMainWindow):
 
         self.editor.update()
 
+        VoiceLibrary.get_instance().prewarm_notes(self.midi.notes, self.audio.sr)
+
     def change_note_length(self, index):
         beats = (
             self.length_combo.currentData()
@@ -2867,6 +3019,13 @@ class MainWindow(QMainWindow):
         self.editor.placement_beats = beats
 
         self.editor.update()
+
+    def _on_lyric_mode_changed(self, enabled: bool):
+        action = self.actions.get("action_lyric_mode")
+        if action is not None and action.isChecked() != enabled:
+            action.setChecked(enabled)
+        if hasattr(self, "audio") and hasattr(self.audio, "set_lyric_mode"):
+            self.audio.set_lyric_mode(enabled)
 
     def toggle_lyric_mode(self):
         if not ENABLE_LYRICS:
@@ -3055,6 +3214,125 @@ class MainWindow(QMainWindow):
 
         self.update_title()
 
+    def update_voice_lib_ui(self):
+        """音声ライブラリの状態をツールバーのラベルに反映する。"""
+        if not hasattr(self, "voice_lib_label"):
+            return
+        vl = VoiceLibrary.get_instance()
+        if vl.folder_path and os.path.isdir(vl.folder_path):
+            folder_name = os.path.basename(os.path.normpath(vl.folder_path))
+            count = sum(len(p) for p in vl.samples.values())
+            phonemes = len(vl.samples)
+            if count > 0:
+                self.voice_lib_label.setText(f"📁 {folder_name} ({count})")
+                self.voice_lib_label.setStyleSheet("color: #90caf9; font-weight: bold; font-size: 11px; margin-left: 6px;")
+                self.voice_lib_label.setToolTip(
+                    f"{vl.folder_path}\n"
+                    f"発音数: {phonemes}, サンプル数: {count}\n"
+                    "※右クリックで再読み込みやエクスプローラー表示ができます"
+                )
+            else:
+                self.voice_lib_label.setText(f"📁 {folder_name} (0)")
+                self.voice_lib_label.setStyleSheet("color: #ef9a9a; font-size: 11px; margin-left: 6px;")
+                self.voice_lib_label.setToolTip(
+                    f"{vl.folder_path}\n"
+                    "※△_○○.wav (例: あ_C4.wav) 形式のファイルが見つかりません"
+                )
+        else:
+            self.voice_lib_label.setText(tr("(未設定)", "(Not set)"))
+            self.voice_lib_label.setStyleSheet("color: #888888; font-size: 11px; margin-left: 6px;")
+            self.voice_lib_label.setToolTip(tr("原音ライブラリフォルダが未設定です。「音声ライブラリを開く」からフォルダを選択してください。", "Voice library not set. Click 'Open Voice Library' to select folder."))
+
+    def open_voice_library(self):
+        """音声ライブラリフォルダを選択して読み込む。"""
+        self.change_voice_library_dir()
+
+    def change_voice_library_dir(self):
+        """音声ライブラリフォルダを選択・変更して読み込む。"""
+        vl = VoiceLibrary.get_instance()
+        current_dir = vl.folder_path if (vl.folder_path and os.path.isdir(vl.folder_path)) else load_last_dir()
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            tr("音声ライブラリフォルダを選択", "Select Voice Library Folder"),
+            current_dir
+        )
+        if folder:
+            vl.set_folder(folder)
+            count = sum(len(p) for p in vl.samples.values())
+            phonemes = len(vl.samples)
+            vl.prewarm_notes(self.midi.notes, self.audio.sr)
+            self.update_voice_lib_ui()
+            save_last_dir(folder)
+            if count > 0:
+                self.statusBar().showMessage(
+                    tr(
+                        f"音声ライブラリを読み込みました: {os.path.basename(folder)} (発音: {phonemes}, サンプル: {count})",
+                        f"Loaded voice library: {os.path.basename(folder)} (Phonemes: {phonemes}, Samples: {count})"
+                    ),
+                    5000
+                )
+            else:
+                QMessageBox.warning(
+                    self,
+                    tr("音声ライブラリ", "Voice Library"),
+                    tr(
+                        f"選択されたフォルダに有効な音声ファイルが見つかりませんでした:\n{folder}\n\n※ファイル名は「あ_C4.wav」のように「△_○○.wav」形式である必要があります。",
+                        f"No valid voice files found in selected folder:\n{folder}\n\n* Filename must follow 'phoneme_pitch.wav' format (e.g. あ_C4.wav)."
+                    )
+                )
+
+    def reveal_voice_library_in_explorer(self):
+        """音声ライブラリフォルダをエクスプローラーで表示する。"""
+        vl = VoiceLibrary.get_instance()
+        if vl.folder_path and os.path.isdir(vl.folder_path):
+            vl.open_folder()
+        else:
+            QMessageBox.information(
+                self,
+                tr("音声ライブラリ", "Voice Library"),
+                tr("音声ライブラリフォルダが設定されていません。", "Voice library folder is not set.")
+            )
+
+    def rescan_voice_library(self):
+        """音声ライブラリフォルダを再スキャンする。"""
+        vl = VoiceLibrary.get_instance()
+        if vl.folder_path and os.path.isdir(vl.folder_path):
+            vl.clear_cache()
+            vl.scan_library()
+            count = sum(len(p) for p in vl.samples.values())
+            phonemes = len(vl.samples)
+            vl.prewarm_notes(self.midi.notes, self.audio.sr)
+            self.update_voice_lib_ui()
+            self.statusBar().showMessage(
+                tr(
+                    f"音声ライブラリを再読み込みしました: {os.path.basename(vl.folder_path)} (発音: {phonemes}, サンプル: {count})",
+                    f"Reloaded voice library: {os.path.basename(vl.folder_path)} (Phonemes: {phonemes}, Samples: {count})"
+                ),
+                4000
+            )
+        else:
+            self.change_voice_library_dir()
+
+    def _show_voice_lib_menu(self, pos):
+        """音声ライブラリボタン右クリックメニュー。"""
+        menu = QMenu(self)
+        change_action = menu.addAction(tr("フォルダを選択・変更...", "Select/Change Folder..."))
+        change_action.triggered.connect(self.change_voice_library_dir)
+
+        rescan_action = menu.addAction(tr("ライブラリを再読み込み", "Reload Library"))
+        rescan_action.triggered.connect(self.rescan_voice_library)
+
+        menu.addSeparator()
+        reveal_action = menu.addAction(tr("エクスプローラーでフォルダを表示", "Show in Explorer"))
+        reveal_action.triggered.connect(self.reveal_voice_library_in_explorer)
+
+        btn = getattr(self, "open_voice_lib_btn", None)
+        if btn:
+            menu.exec(btn.mapToGlobal(pos))
+        else:
+            menu.exec(self.mapToGlobal(pos))
+
+
     def open_audio(self):
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -3227,6 +3505,7 @@ class MainWindow(QMainWindow):
             self.editor.update()
             self._project_path = None
             self.update_title()
+            VoiceLibrary.get_instance().prewarm_notes(self.midi.notes, self.audio.sr)
 
         except Exception as e:
             QMessageBox.critical(
@@ -3478,7 +3757,36 @@ if __name__ == "__main__":
     else:
         app.styleHints().setColorScheme(Qt.ColorScheme.Unknown)
 
-    initial_file = sys.argv[1] if len(sys.argv) > 1 else None
+    initial_file = None
+    voice_lib_dir = os.environ.get("WAVENOTE_VOICE_LIB", None)
+
+    args = sys.argv[1:]
+    idx = 0
+    while idx < len(args):
+        arg = args[idx]
+        if arg in ("--voice-dir", "--voice-lib") and idx + 1 < len(args):
+            voice_lib_dir = args[idx + 1]
+            idx += 2
+        elif arg.startswith("--voice-dir="):
+            voice_lib_dir = arg.split("=", 1)[1]
+            idx += 1
+        elif arg.startswith("--voice-lib="):
+            voice_lib_dir = arg.split("=", 1)[1]
+            idx += 1
+        elif os.path.isdir(arg):
+            voice_lib_dir = arg
+            idx += 1
+        elif os.path.isfile(arg):
+            initial_file = arg
+            idx += 1
+        else:
+            if not initial_file:
+                initial_file = arg
+            idx += 1
+
+    if voice_lib_dir and os.path.isdir(voice_lib_dir):
+        VoiceLibrary.get_instance().set_folder(voice_lib_dir)
+
     window = MainWindow(initial_file=initial_file)
     window.show()
 

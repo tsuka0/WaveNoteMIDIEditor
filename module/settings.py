@@ -129,6 +129,14 @@ def load_last_dir(default="", key="last_open_dir"):
     return default
 
 
+def save_last_dir(directory, key="last_open_dir"):
+    if directory and os.path.isdir(str(directory)):
+        save_value(
+            key,
+            str(directory)
+        )
+
+
 def save_last_dir_from_path(path, key="last_open_dir"):
     directory = os.path.dirname(
         os.path.abspath(str(path))
