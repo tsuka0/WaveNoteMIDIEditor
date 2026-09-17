@@ -80,10 +80,8 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QVBoxLayout,
-    QHBoxLayout,
     QFormLayout, 
     QListWidget,
-    QListWidgetItem,
     QKeySequenceEdit,
     QSizePolicy,
     QWidget
@@ -1543,6 +1541,8 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
         self.voice_lib_label = QLabel()
         self.voice_lib_label.setStyleSheet("color: #64b5f6; font-size: 11px; margin-left: 4px;")
+        self.voice_lib_label.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.voice_lib_label.customContextMenuRequested.connect(self._show_voice_lib_menu)
         toolbar.addWidget(self.voice_lib_label)
         self.update_voice_lib_ui()
 
@@ -1956,13 +1956,6 @@ class MainWindow(QMainWindow):
     def _sync_audio_ui(self, audio=None):
         audio = audio or self.audio
 
-        if hasattr(self, "offset_box"):
-            self.offset_box.blockSignals(True)
-            self.offset_box.setValue(
-                audio.offset if audio.offset is not None else 0.0
-            )
-            self.offset_box.blockSignals(False)
-
         self.volume_slider.blockSignals(True)
         self.volume_slider.setValue(
             int((audio.volume if audio.volume is not None else 0.5) * 100)
@@ -2284,12 +2277,6 @@ class MainWindow(QMainWindow):
             "play_all_tracks",
             "1" if checked else "0"
         )
-
-    def change_offset(self, value):
-        self.audio.offset = value
-        self._persist_active_audio_params()
-        self._refresh_timeline_reference()
-        self.editor.update()
 
     def change_threshold(self, value):
         self.editor.spectrum_threshold = (
@@ -3272,7 +3259,7 @@ class MainWindow(QMainWindow):
                 self.voice_lib_label.setToolTip(
                     f"{vl.folder_path}\n"
                     f"発音数: {phonemes}, サンプル数: {count}\n"
-                    "※右クリックで再読み込みやエクスプローラー表示ができます"
+                    "※右クリックで再読み込み・エクスプローラー表示・設定解除ができます"
                 )
             else:
                 self.voice_lib_label.setText(f"📁 {folder_name} (0)")
@@ -3353,23 +3340,38 @@ class MainWindow(QMainWindow):
             self.change_voice_library_dir()
 
     def _show_voice_lib_menu(self, pos):
-        """音声ライブラリボタン右クリックメニュー。"""
+        """音声ライブラリラベルの右クリックメニュー。"""
         menu = QMenu(self)
         change_action = menu.addAction(tr("フォルダを選択・変更...", "Select/Change Folder..."))
         change_action.triggered.connect(self.change_voice_library_dir)
 
-        rescan_action = menu.addAction(tr("ライブラリを再読み込み", "Reload Library"))
-        rescan_action.triggered.connect(self.rescan_voice_library)
+        if VoiceLibrary.get_instance().folder_path:
+            rescan_action = menu.addAction(tr("ライブラリを再読み込み", "Reload Library"))
+            rescan_action.triggered.connect(self.rescan_voice_library)
 
-        menu.addSeparator()
         reveal_action = menu.addAction(tr("エクスプローラーでフォルダを表示", "Show in Explorer"))
         reveal_action.triggered.connect(self.reveal_voice_library_in_explorer)
 
-        btn = getattr(self, "open_voice_lib_btn", None)
-        if btn:
-            menu.exec(btn.mapToGlobal(pos))
+        if VoiceLibrary.get_instance().folder_path:
+            menu.addSeparator()
+            clear_action = menu.addAction(tr("フォルダを解除（未設定に戻す）", "Clear Folder (Reset to Not Set)"))
+            clear_action.triggered.connect(self.clear_voice_library)
+
+        widget = self.sender()
+        if widget is not None:
+            menu.exec(widget.mapToGlobal(pos))
         else:
             menu.exec(self.mapToGlobal(pos))
+
+    def clear_voice_library(self):
+        """音声ライブラリフォルダの設定を解除し、未設定の状態に戻す。"""
+        vl = VoiceLibrary.get_instance()
+        vl.clear_folder()
+        self.update_voice_lib_ui()
+        self.statusBar().showMessage(
+            tr("音声ライブラリの設定を解除しました。", "Voice library settings cleared."),
+            4000
+        )
 
 
     def open_audio(self):
@@ -3733,17 +3735,6 @@ class MainWindow(QMainWindow):
                     self.editor.stop()
 
         if (
-            hasattr(self, "offset_box") and
-            self.offset_box.value() !=
-            self.audio.offset
-        ):
-            self.offset_box.blockSignals(True)
-            self.offset_box.setValue(
-                self.audio.offset
-            )
-            self.offset_box.blockSignals(False)
-
-        if (
             self.editor.play_position !=
             previous_position
         ):
@@ -3756,7 +3747,6 @@ class MainWindow(QMainWindow):
 
 if __name__ == "__main__":
     try:
-        import ctypes
         myappid = "wavenote.midi.editor.v2"
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
     except Exception:

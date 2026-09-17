@@ -710,7 +710,6 @@ class MidiData:
         """
         bpm = float(bpm)
         t_new = max(0.0, float(start_time))
-        spb = 60.0 / max(1e-6, bpm)
 
         self._ensure_caches()
 

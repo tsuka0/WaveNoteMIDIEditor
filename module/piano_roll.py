@@ -4,8 +4,7 @@ import bisect
 import numpy as np
 from PySide6.QtWidgets import QWidget, QDialog, QSpinBox, QDoubleSpinBox, QCheckBox, QLabel, QVBoxLayout, QHBoxLayout, QDialogButtonBox, QMenu, QInputDialog, QLineEdit
 from PySide6.QtCore import Qt, QPointF, QRectF, Signal, QTimer
-from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont, QFontMetrics, QKeySequence, QImage, QPixmap
-from .midi import PedalEvent
+from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont, QFontMetrics, QKeySequence, QImage
 from .spectrum import SpectrumData
 from .taptempo import TapTempoEngine, MIN_TAPS_FOR_APPLY
 from .i18n import tr
@@ -1029,7 +1028,6 @@ class PianoRoll(QWidget):
         event
     ):
         key = event.key()
-        modifiers = event.modifiers()
 
         if (
             key == Qt.Key_Escape and
@@ -3290,7 +3288,6 @@ class PianoRoll(QWidget):
             return False, False, False
         rt1, rt2, rp1, rp2 = self.selection_rect[:4]
         r_in_lane = self.selection_rect[4] if len(self.selection_rect) > 4 else False
-        r_in_pedal = self.selection_rect[5] if len(self.selection_rect) > 5 else False
         click_time = self.x_to_time(x)
         if r_in_lane:
             in_rect = rt1 <= click_time <= rt2
@@ -3773,7 +3770,6 @@ class PianoRoll(QWidget):
         best = None
         best_d = None
 
-        t = self.x_to_time(x)
         times = [e.time for e in events]
         # x-6 から x+6 の範囲
         t0 = self.x_to_time(x - 6)
@@ -6256,7 +6252,6 @@ class PianoRoll(QWidget):
         )
 
         self._ensure_note_cache()
-        count = getattr(self, "_cached_note_count", 0)
 
         num, den = self.midi.time_sig_at(
             self.play_position
@@ -6266,10 +6261,6 @@ class PianoRoll(QWidget):
             self.midi.measure_beat(
                 self.play_position
             )
-        )
-
-        bpm = self.midi.tempo_at(
-            self.play_position
         )
 
         painter.setFont(
@@ -6288,18 +6279,6 @@ class PianoRoll(QWidget):
                 )
             )
         )
-
-        # painter.drawText(
-        #     10,
-        #     self.height() - 26,
-        #     f"ノーツ {count} | "
-        #     f"拍子 {num}/{den} | "
-        #     f"{measure + 1}小節 "
-        #     f"{beat_in + 1}拍 | "
-        #     f"{bpm:g} BPM | "
-        #     f"{self.play_position:.2f} / "
-        #     f"{self.audio_duration:.2f}s"
-        # )
 
         scrub_y = (
             self.height() -

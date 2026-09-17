@@ -8,11 +8,10 @@ Voice Library & WORLD Synthesizer Module for WaveNote MIDI Editor.
 import os
 import re
 import sys
-import time
 import hashlib
 import threading
 import subprocess
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 import soundfile as sf
@@ -131,6 +130,14 @@ class VoiceLibrary:
         save_value("voice_library_dir", folder_path)
         self.clear_cache()
         self.scan_library()
+
+    def clear_folder(self):
+        """音声ライブラリフォルダの設定を解除し、未設定状態に戻す。"""
+        self.cancel_prewarm()
+        self.folder_path = ""
+        self.samples.clear()
+        self.clear_cache()
+        save_value("voice_library_dir", "")
 
     def clear_cache(self):
         """メモリキャッシュをクリアする。"""
@@ -553,7 +560,7 @@ class VoiceLibrary:
             # 音量均一化 ＆ ピーク最大化 (0.95)
             y = self.normalize_and_maximize_audio(y, target_peak=0.95)
             return y
-        except Exception as e:
+        except Exception:
             return None
 
     def extract_world_features(self, file_path: str) -> Optional[Tuple]:
