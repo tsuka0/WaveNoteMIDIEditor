@@ -88,7 +88,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QWidget
 )
-from PySide6.QtGui import QAction, QKeySequence, QIcon
+from PySide6.QtGui import QAction, QKeySequence, QIcon, QPalette
 from PySide6.QtCore import QTimer, Qt, QEvent, QObject
 from module.audio import AudioData
 from module.spectrum import SpectrumData
@@ -115,7 +115,8 @@ DEFAULT_SHORTCUTS = {
     "action_split": "S",
     "action_select_all": "Ctrl+A",
     "action_copy": "Ctrl+C",
-    "action_paste": "Ctrl+V"
+    "action_paste": "Ctrl+V",
+    "action_add_marker": "T"
 }
 
 if ENABLE_LYRICS:
@@ -127,18 +128,75 @@ def get_shortcut(key):
         return str(val)
     return DEFAULT_SHORTCUTS.get(key, "")
 
-def apply_toggle_style(btn, checked_color):
-    """トグルボタンのスタイル。ONのとき分かりやすいように指定色で塗りつぶし、
-    OFFのときはOSのテーマ(ダーク/ライト)に従うようにスタイルシートをリセットする。"""
+def _is_dark_theme():
+    """アプリのテーマがダークかどうかをパレットの背景色の輝度で判定する。"""
+    try:
+        return QApplication.palette().color(QPalette.Window).lightness() < 128
+    except Exception:
+        return True
+
+
+def _lighten_hex(color, factor=0.2):
+    """#RRGGBB を白方向(factor>0) / 黒方向(factor<0)へ寄せる。"""
+    color = color.lstrip("#")
+    r = int(color[0:2], 16)
+    g = int(color[2:4], 16)
+    b = int(color[4:6], 16)
+
+    def adj(c):
+        if factor >= 0:
+            return min(255, int(c + (255 - c) * factor))
+        return max(0, int(c * (1 + factor)))
+
+    r, g, b = adj(r), adj(g), adj(b)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def apply_toggle_style(btn, checked_color, off_color=None):
+    """トグルボタンのスタイル。
+    ON: チェック色で塗りつぶし (白太字)。
+    OFF: テーマ(ダーク/ライト)に合わせたグレー背景。ライトテーマでは薄いグレーにし、
+         背景から浮いて見えないようにする。
+    ホバー時も ON/OFF それぞれの状態色を暗/明方向へ調整した背景にすることで、
+    マウスが乗っている間も ON/OFF の違いがはっきり分かるようにする。
+    ON/OFF両方でパディングを固定し、サイズ変動を防ぐ。
+    テーマが切り替わった場合も paletteChanged で再適用する。"""
+    hover_on = _lighten_hex(checked_color, 0.25)
+    pad = "padding: 4px 10px; border: none; border-radius: 4px;"
+
+    def _theme_colors():
+        dark = _is_dark_theme()
+        if off_color is not None:
+            base_off = off_color
+        else:
+            base_off = "#3a3a3a" if dark else "#e0e0e0"
+        off_text = "#bbb" if dark else "#444"
+        hover_off = _lighten_hex(base_off, 0.2 if dark else -0.15)
+        return base_off, off_text, hover_off
+
     def update_style(checked):
         if checked:
-            btn.setStyleSheet(f"background-color: {checked_color}; color: white; font-weight: bold; border: none; padding: 4px 10px; border-radius: 4px;")
+            btn.setStyleSheet(
+                f"QPushButton {{ background-color: {checked_color}; color: white; "
+                f"font-weight: bold; {pad} }} "
+                f"QPushButton:hover {{ background-color: {hover_on}; }}"
+            )
         else:
-            btn.setStyleSheet("")
-    
+            base_off, off_text, hover_off = _theme_colors()
+            btn.setStyleSheet(
+                f"QPushButton {{ background-color: {base_off}; color: {off_text}; "
+                f"{pad} }} "
+                f"QPushButton:hover {{ background-color: {hover_off}; }}"
+            )
+
     btn.toggled.connect(update_style)
-    # 遅延適用 (初期化直後は状態が反映されない場合があるため)
     QTimer.singleShot(0, lambda: update_style(btn.isChecked()))
+
+    app = QApplication.instance()
+    if app is not None and hasattr(app, "paletteChanged"):
+        app.paletteChanged.connect(
+            lambda _pal: update_style(btn.isChecked())
+        )
 
 
 def make_help_badge(tooltip):
@@ -1102,9 +1160,6 @@ class MainWindow(QMainWindow):
         open_audio_action = QAction(tr("オーディオを開く", "Open Audio"), self)
         open_audio_action.triggered.connect(self.open_audio)
 
-        open_voice_lib_action = QAction(tr("音声ライブラリを開く", "Open Voice Library"), self)
-        open_voice_lib_action.triggered.connect(self.open_voice_library)
-
         select_voice_lib_action = QAction(tr("音声ライブラリフォルダを選択...", "Select Voice Library Folder..."), self)
         select_voice_lib_action.triggered.connect(self.change_voice_library_dir)
 
@@ -1122,7 +1177,6 @@ class MainWindow(QMainWindow):
         file_menu.addAction(save_project_action)
         file_menu.addAction(open_midi_action)
         file_menu.addAction(open_audio_action)
-        file_menu.addAction(open_voice_lib_action)
         file_menu.addAction(select_voice_lib_action)
         file_menu.addAction(save_action)
         file_menu.addAction(save_as_action)
@@ -1253,6 +1307,26 @@ class MainWindow(QMainWindow):
             )
             edit_menu.addAction(lyric_mode_action)
             self.actions["action_lyric_mode"] = lyric_mode_action
+
+        add_marker_action = QAction(
+            tr("テキストを追加", "Add Text"),
+            self
+        )
+        add_marker_action.setToolTip(
+            tr(
+                "現在の再生位置にテキストを追加します (T)。\n"
+                "タイムライン上部のテキストをダブルクリックで編集、"
+                "右クリックで削除できます。",
+                "Add a text at the current play position (T).\n"
+                "Double-click a text on the timeline to edit it, "
+                "right-click to delete it."
+            )
+        )
+        add_marker_action.triggered.connect(
+            self.editor.add_marker_at_play_position
+        )
+        edit_menu.addAction(add_marker_action)
+        self.actions["action_add_marker"] = add_marker_action
 
         stop_action = QAction(
             tr("停止", "Stop"),
@@ -1429,7 +1503,7 @@ class MainWindow(QMainWindow):
         spacer2 = QWidget()
         spacer2.setFixedWidth(8)
         toolbar.addWidget(spacer2)
-        apply_toggle_style(self.mute_midi_button, "#c0392b")
+        apply_toggle_style(self.mute_midi_button, "#e53935")
         self.mute_midi_button.setToolTip(
             tr("再生時にMIDI音を鳴らさず、波形(オーディオ)のみ再生します", "Play only the waveform (audio) without MIDI sounds during playback")
         )
@@ -1451,7 +1525,7 @@ class MainWindow(QMainWindow):
         spacer3 = QWidget()
         spacer3.setFixedWidth(8)
         toolbar.addWidget(spacer3)
-        apply_toggle_style(self.play_all_tracks_button, "#2e7d32")
+        apply_toggle_style(self.play_all_tracks_button, "#43a047")
         self.play_all_tracks_button.setToolTip(
             tr("単一トラック選択中でも、全トラックのMIDIを鳴らして再生します", "Play MIDI from all tracks even when a single track is selected")
         )
@@ -1467,24 +1541,6 @@ class MainWindow(QMainWindow):
         )
 
         toolbar.addSeparator()
-        spacer_vl = QWidget()
-        spacer_vl.setFixedWidth(6)
-        toolbar.addWidget(spacer_vl)
-
-        self.open_voice_lib_btn = QPushButton(tr("音声ライブラリを開く", "Open Voice Library"))
-        self.open_voice_lib_btn.setToolTip(
-            tr(
-                "原音ライブラリフォルダ (△_○○.wav) を選択して読み込みます。\n"
-                "右クリックで再読み込みやエクスプローラー表示ができます。",
-                "Select and load voice library folder (△_○○.wav).\n"
-                "Right-click to reload or reveal in Explorer."
-            )
-        )
-        self.open_voice_lib_btn.clicked.connect(self.open_voice_library)
-        self.open_voice_lib_btn.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.open_voice_lib_btn.customContextMenuRequested.connect(self._show_voice_lib_menu)
-        toolbar.addWidget(self.open_voice_lib_btn)
-
         self.voice_lib_label = QLabel()
         self.voice_lib_label.setStyleSheet("color: #64b5f6; font-size: 11px; margin-left: 4px;")
         toolbar.addWidget(self.voice_lib_label)
@@ -1599,35 +1655,13 @@ class MainWindow(QMainWindow):
         self.eq_reset_btn.clicked.connect(self.reset_eq)
         audio_toolbar.addWidget(self.eq_reset_btn)
 
-        # Audio Offset
-        audio_toolbar.addWidget(
-            label_with_help(
-                "  " + tr("音声オフセット", "Audio Offset"),
-                tr(
-                    "MIDIと音声の時刻のずれ(音ズレ)を秒単位で調整します。\n"
-                    "波形とノーツの位置が合わないときに調整してください。",
-                    "Adjusts the timing gap between the audio and MIDI in seconds.\n"
-                    "Useful when the waveform does not line up with the notes."
-                ),
-                tail=" "
-            )
-        )
-
-        self.offset_box = QDoubleSpinBox()
-        self.offset_box.setRange(-60.0, 60.0)
-        self.offset_box.setDecimals(3)
-        self.offset_box.setSingleStep(0.005)
-        self.offset_box.setSuffix(" s")
-        self.offset_box.valueChanged.connect(self.change_offset)
-        audio_toolbar.addWidget(self.offset_box)
-
         # Audio Mute
         self.mute_audio_button = QPushButton(tr("音声ミュート", "Mute Audio"))
         self.mute_audio_button.setCheckable(True)
         spacer4 = QWidget()
         spacer4.setFixedWidth(8)
         audio_toolbar.addWidget(spacer4)
-        apply_toggle_style(self.mute_audio_button, "#c0392b")
+        apply_toggle_style(self.mute_audio_button, "#e53935")
         self.mute_audio_button.setToolTip(
             tr("音声ファイルの再生をミュートします(MIDI音源は鳴り続けます)", "Mutes audio file playback (MIDI keeps playing)")
         )
@@ -1920,16 +1954,14 @@ class MainWindow(QMainWindow):
                 return
 
     def _sync_audio_ui(self, audio=None):
-        if not hasattr(self, "offset_box"):
-            return
-
         audio = audio or self.audio
 
-        self.offset_box.blockSignals(True)
-        self.offset_box.setValue(
-            audio.offset if audio.offset is not None else 0.0
-        )
-        self.offset_box.blockSignals(False)
+        if hasattr(self, "offset_box"):
+            self.offset_box.blockSignals(True)
+            self.offset_box.setValue(
+                audio.offset if audio.offset is not None else 0.0
+            )
+            self.offset_box.blockSignals(False)
 
         self.volume_slider.blockSignals(True)
         self.volume_slider.setValue(
@@ -2479,6 +2511,10 @@ class MainWindow(QMainWindow):
             "midi_filter_track": self.midi.filter_track,
             "midi_tempos": self.midi.tempos,
             "midi_timesigs": self.midi.time_signatures,
+            "midi_markers": [
+                (t, text)
+                for t, text in getattr(self.midi, "markers", [])
+            ],
             "midi_beat_phase": getattr(self.midi, "beat_phase", 0.0),
             "audio_offset": self._global_audio.offset,
             "audio_volume": self._global_audio.volume,
@@ -2747,6 +2783,13 @@ class MainWindow(QMainWindow):
             new_midi.time_signatures = [
                 (float(ts[0]), int(ts[1]), int(ts[2])) for ts in raw_timesigs
             ] if raw_timesigs else [(0.0, 4, 4)]
+
+            raw_markers = project.get("midi_markers", []) or []
+            new_midi.markers = [
+                (float(m[0]), str(m[1]))
+                for m in raw_markers
+                if isinstance(m, (list, tuple)) and len(m) >= 2
+            ] if isinstance(raw_markers, list) else []
 
             new_midi.beat_phase = float(
                 project.get("midi_beat_phase", 0.0)
@@ -3241,11 +3284,7 @@ class MainWindow(QMainWindow):
         else:
             self.voice_lib_label.setText(tr("(未設定)", "(Not set)"))
             self.voice_lib_label.setStyleSheet("color: #888888; font-size: 11px; margin-left: 6px;")
-            self.voice_lib_label.setToolTip(tr("原音ライブラリフォルダが未設定です。「音声ライブラリを開く」からフォルダを選択してください。", "Voice library not set. Click 'Open Voice Library' to select folder."))
-
-    def open_voice_library(self):
-        """音声ライブラリフォルダを選択して読み込む。"""
-        self.change_voice_library_dir()
+            self.voice_lib_label.setToolTip(tr("原音ライブラリフォルダが未設定です。「音声ライブラリフォルダを選択...」からフォルダを選択してください。", "Voice library not set. Click 'Select Voice Library Folder...' to choose a folder."))
 
     def change_voice_library_dir(self):
         """音声ライブラリフォルダを選択・変更して読み込む。"""
@@ -3694,6 +3733,7 @@ class MainWindow(QMainWindow):
                     self.editor.stop()
 
         if (
+            hasattr(self, "offset_box") and
             self.offset_box.value() !=
             self.audio.offset
         ):

@@ -56,6 +56,7 @@ class MidiData:
         self.bpm = 120
         self.tempos = [(0.0, 120.0)]
         self.time_signatures = [(0.0, 4, 4)]
+        self.markers = []
         self.filter_track = None
         self.play_all_tracks = False
         self.beat_phase = 0.0
@@ -105,6 +106,10 @@ class MidiData:
             ],
             "tempos": self.tempos.copy(),
             "time_signatures": self.time_signatures.copy(),
+            "markers": [
+                (t, text)
+                for t, text in getattr(self, "markers", [])
+            ],
             "beat_phase": self.beat_phase,
             "extra_state": getattr(self, "extra_state", {}).copy()
         }
@@ -147,6 +152,11 @@ class MidiData:
         self.time_signatures = [
             (t, n, d)
             for t, n, d in snap["time_signatures"]
+        ]
+
+        self.markers = [
+            (float(t), str(text))
+            for t, text in snap.get("markers", [])
         ]
 
         self.beat_phase = float(
@@ -550,39 +560,127 @@ class MidiData:
 
         return mapper
 
-    def _apply_tempo_map_change(self, apply):
+    def _apply_tempo_map_change(self, apply, move_marks=True):
+        """テンポマップ変更の前後で拍位置を維持する。
+
+        既存ノート・ペダルに加え、既存のテンポマーカーと拍子マーカーも
+        同じ拍位置を保つよう時間を再配置する (move_marks=True)。
+        move_marks=False はタップ計測によるテンポフィット用で、
+        テンポマーカーを計測結果で置き換えるため再配置しない。
+        """
+        old_time_to_beat = self._time_to_beat_mapper()
+
         has_content = any(
             track.notes or track.pedals
             for track in self.tracks
         )
 
-        if not has_content:
-            apply()
-            return
-
-        old_time_to_beat = self._time_to_beat_mapper()
+        old_tempo_times = [
+            t
+            for t, _b in self.tempos
+        ]
+        old_tempo_beats = [
+            old_time_to_beat(t)
+            for t in old_tempo_times
+        ]
+        old_sig_marks = [
+            (old_time_to_beat(t), n, d)
+            for t, n, d in self.time_signatures
+        ]
+        old_marker_beats = [
+            (old_time_to_beat(t), text)
+            for t, text in getattr(self, "markers", [])
+        ]
 
         apply()
 
-        for track in self.tracks:
-            for note in track.notes:
-                start_beat = old_time_to_beat(note.start)
-                end_beat = old_time_to_beat(
-                    note.start + note.duration
-                )
+        if move_marks:
+            # 既存テンポマーカー(および新規テキスト)を、適用前の絶対拍位置が
+            # その後も保たれるよう、先頭から連鎖的に時刻を再算出する。
+            # テキストの絶対拍位置は変更しないため、後方のマーカーもノートと
+            # 同じように連動して動く。
+            beats = []
+            ordered = list(self.tempos)
 
-                new_start = self.beat_to_time(start_beat)
+            for t, _b in ordered:
+                beat = None
 
-                note.duration = max(
-                    1e-3,
-                    self.beat_to_time(end_beat) - new_start
-                )
-                note.start = new_start
+                for i, ot in enumerate(old_tempo_times):
+                    if abs(ot - t) < 1e-6:
+                        beat = old_tempo_beats[i]
+                        break
 
-            for pedal in track.pedals:
-                pedal.time = self.beat_to_time(
-                    old_time_to_beat(pedal.time)
-                )
+                if beat is None:
+                    beat = old_time_to_beat(t)
+
+                beats.append(beat)
+
+            new_tempos = []
+            cur_t = ordered[0][0]
+
+            for i, (t, b) in enumerate(ordered):
+                if i == 0:
+                    new_tempos.append((cur_t, b))
+                    continue
+
+                seg_beat = beats[i] - beats[i - 1]
+                cur_t = new_tempos[-1][0] + seg_beat * 60.0 / ordered[i - 1][1]
+                new_tempos.append((cur_t, b))
+
+            self.tempos = new_tempos
+            self.bpm = self.tempos[0][1]
+            self._refresh_caches()
+        else:
+            self._refresh_caches()
+
+        if has_content:
+            for track in self.tracks:
+                for note in track.notes:
+                    start_beat = old_time_to_beat(note.start)
+                    end_beat = old_time_to_beat(
+                        note.start + note.duration
+                    )
+
+                    new_start = self.beat_to_time(start_beat)
+
+                    note.duration = max(
+                        1e-3,
+                        self.beat_to_time(end_beat) - new_start
+                    )
+                    note.start = new_start
+
+                for pedal in track.pedals:
+                    pedal.time = self.beat_to_time(
+                        old_time_to_beat(pedal.time)
+                    )
+
+        if old_marker_beats:
+            self.markers = sorted(
+                (
+                    (self.beat_to_time(beat), text)
+                    for beat, text in old_marker_beats
+                ),
+                key=lambda x: x[0]
+            )
+
+        if move_marks:
+            # 拍子マーカーも同じ絶対拍位置を保って再配置する。
+            new_sigs = [
+                (self.beat_to_time(beat), n, d)
+                for beat, n, d in old_sig_marks
+            ]
+            new_sigs.sort(key=lambda x: x[0])
+
+            merged_sigs = []
+
+            for t, n, d in new_sigs:
+                if merged_sigs and abs(merged_sigs[-1][0] - t) < 1e-6:
+                    merged_sigs[-1] = (merged_sigs[-1][0], n, d)
+                else:
+                    merged_sigs.append((t, n, d))
+
+            self.time_signatures = merged_sigs
+            self._rebuild_sig_cache()
 
         self._bump()
 
@@ -654,7 +752,7 @@ class MidiData:
             self.beat_phase += delta
             self._refresh_caches()
 
-        self._apply_tempo_map_change(apply)
+        self._apply_tempo_map_change(apply, move_marks=False)
 
     def add_tempo(self, time, bpm):
         def apply():
@@ -731,6 +829,34 @@ class MidiData:
 
         self.time_signatures = out
         self._rebuild_sig_cache()
+
+    def add_marker(self, time, text):
+        """指定時刻にテキストを追加する (同一時刻のテキストは置き換え)。"""
+        time = max(0.0, float(time))
+
+        out = [
+            (t, tt)
+            for t, tt in getattr(self, "markers", [])
+            if abs(t - time) >= 1e-6
+        ]
+        out.append((time, str(text)))
+        out.sort(key=lambda x: x[0])
+        self.markers = out
+
+    def remove_marker(self, time):
+        """指定時刻のテキストを削除する。"""
+        self.markers = [
+            (t, text)
+            for t, text in getattr(self, "markers", [])
+            if abs(t - time) >= 1e-6
+        ]
+
+    def set_marker_text(self, time, text):
+        """指定時刻のテキストを変更する。"""
+        self.markers = [
+            (t, (str(text) if abs(t - time) < 1e-6 else tt))
+            for t, tt in getattr(self, "markers", [])
+        ]
 
     def _rebuild_tempo_cache(self):
         tempos = self.tempos
@@ -1131,6 +1257,10 @@ class MidiData:
         return created
 
     def save(self, path):
+        """MIDI ファイルに書き出す。
+        self.markers (テキストマーカー) はプロジェクト(.wnp)専用であり、
+        MIDI ファイルには含めない。
+        """
         midi = mido.MidiFile(
             ticks_per_beat=480,
             charset='cp932'

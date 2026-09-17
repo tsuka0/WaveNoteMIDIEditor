@@ -2,9 +2,9 @@ import math
 import time
 import bisect
 import numpy as np
-from PySide6.QtWidgets import QWidget, QDialog, QSpinBox, QDoubleSpinBox, QCheckBox, QLabel, QVBoxLayout, QHBoxLayout, QDialogButtonBox, QMenu, QInputDialog
+from PySide6.QtWidgets import QWidget, QDialog, QSpinBox, QDoubleSpinBox, QCheckBox, QLabel, QVBoxLayout, QHBoxLayout, QDialogButtonBox, QMenu, QInputDialog, QLineEdit
 from PySide6.QtCore import Qt, QPointF, QRectF, Signal, QTimer
-from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont, QKeySequence, QImage, QPixmap
+from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont, QFontMetrics, QKeySequence, QImage, QPixmap
 from .midi import PedalEvent
 from .spectrum import SpectrumData
 from .taptempo import TapTempoEngine, MIN_TAPS_FOR_APPLY
@@ -79,7 +79,7 @@ class PianoRoll(QWidget):
         ]
 
         self.left_width = 76
-        self.top_height = 52
+        self.top_height = 70
         self.bottom_height = 162
         self.velocity_lane_height = 80
         self.pedal_lane_height = 40
@@ -1491,6 +1491,23 @@ class PianoRoll(QWidget):
             if self.audio.playing:
                 return
 
+            if y < self.top_height:
+                marker_hit = self._hit_marker(x, y)
+
+                if marker_hit is not None:
+                    menu = QMenu(self)
+                    delete_action = menu.addAction(
+                        tr("このテキストを削除", "Delete This Text")
+                    )
+                    action = menu.exec(
+                        event.globalPosition().toPoint()
+                    )
+                    if action == delete_action:
+                        self.midi.push_undo()
+                        self.midi.remove_marker(marker_hit[0])
+                        self._after_marker_edit()
+                    return
+
             note = self.note_at(x, y)
 
             if note is None and y >= lane_top and y < lane_top + self.velocity_lane_height:
@@ -2039,13 +2056,19 @@ class PianoRoll(QWidget):
         super().mouseDoubleClickEvent(event)
 
     def edit_marker_at(self, x, y):
+        marker_hit = self._hit_marker(x, y)
+
+        if marker_hit is not None:
+            self._edit_marker(marker_hit)
+            return True
+
         tempo_hit = None
         timesig_hit = None
 
-        if self.top_height - 26 <= y <= self.top_height - 12:
+        if self.top_height - 42 <= y <= self.top_height - 30:
             tempo_hit = self._hit_tempo_marker(x)
 
-        if self.top_height - 16 <= y <= self.top_height - 1:
+        if self.top_height - 29 <= y <= self.top_height - 17:
             timesig_hit = self._hit_timesig_marker(x)
 
         if tempo_hit is not None:
@@ -2057,6 +2080,49 @@ class PianoRoll(QWidget):
             return True
 
         return False
+
+    def _hit_marker(self, px, py):
+        best = None
+        best_d = None
+
+        fm = QFontMetrics(
+            QFont(
+                "Segoe UI",
+                9
+            )
+        )
+
+        for t_sec, text in getattr(
+            self.midi,
+            "markers",
+            []
+        ):
+            x = self.time_to_x(t_sec)
+
+            if x < self.left_width - 1:
+                continue
+
+            text = text if text else "?"
+
+            tw = fm.horizontalAdvance(text)
+            asc = fm.ascent()
+            dsc = fm.descent()
+
+            left = x + 1
+            right = x + 4 + tw + 2
+            top = self.top_height - 4 - asc - 1
+            bottom = self.top_height - 4 + dsc + 1
+
+            if not (left - 2 <= px <= right and top - 2 <= py <= bottom):
+                continue
+
+            d = abs(px - (x + 3))
+
+            if best_d is None or d < best_d:
+                best = (t_sec, text)
+                best_d = d
+
+        return best
 
     def _hit_tempo_marker(self, px):
         best = None
@@ -2099,6 +2165,66 @@ class PianoRoll(QWidget):
                 best_d = d
 
         return best
+
+    def _edit_marker(self, marker):
+        t_sec, text = marker
+
+        new_text, ok = QInputDialog.getText(
+            self,
+            tr("テキストの編集", "Edit Text"),
+            tr(
+                f"位置 {t_sec:.2f}s のテキスト:",
+                f"Text at {t_sec:.2f}s:"
+            ),
+            QLineEdit.Normal,
+            text
+        )
+
+        if not ok:
+            return
+
+        self.midi.push_undo()
+        self.midi.set_marker_text(t_sec, new_text)
+        self._after_marker_edit()
+
+    def add_marker_at_play_position(self):
+        """現在の再生位置にテキストを追加する (テキストは入力ダイアログで指定)。"""
+        pos = max(0.0, self.play_position)
+
+        existing = None
+
+        for t_sec, text in getattr(self.midi, "markers", []):
+            if abs(t_sec - pos) < 0.3:
+                existing = (t_sec, text)
+                break
+
+        if existing is not None:
+            self._edit_marker(existing)
+            return
+
+        n = len(getattr(self.midi, "markers", [])) + 1
+        default_text = tr(f"テキスト {n}", f"Text {n}")
+
+        new_text, ok = QInputDialog.getText(
+            self,
+            tr("テキストの追加", "Add Text"),
+            tr(
+                f"位置 {pos:.2f}s のテキスト:",
+                f"Text at {pos:.2f}s:"
+            ),
+            QLineEdit.Normal,
+            default_text
+        )
+
+        if not ok:
+            return
+
+        if not new_text.strip():
+            new_text = default_text
+
+        self.midi.push_undo()
+        self.midi.add_marker(pos, new_text)
+        self._after_marker_edit()
 
     def _edit_tempo_marker(self, marker):
         t_sec, bpm = marker
@@ -5913,6 +6039,62 @@ class PianoRoll(QWidget):
                     f"{t_m:.2f}s"
                 )
 
+        # テキスト: タイムライン最下部の専用帯に描画 (他のラベルとは被らない)
+        painter.setPen(
+            QPen(
+                QColor(
+                    255,
+                    120,
+                    190
+                )
+            )
+        )
+
+        marker_last_x = float("-inf")
+
+        for t_sec, text in getattr(
+            self.midi,
+            "markers",
+            []
+        ):
+            if (
+                t_sec <
+                visible_start -
+                0.001
+            ):
+                continue
+
+            if t_sec > visible_end:
+                break
+
+            x = self.time_to_x(
+                t_sec
+            )
+
+            if x < self.left_width:
+                continue
+
+            if (
+                x - marker_last_x <
+                4.0
+            ):
+                continue
+
+            marker_last_x = x
+
+            painter.drawLine(
+                int(x),
+                self.top_height - 16,
+                int(x),
+                self.top_height - 4
+            )
+
+            painter.drawText(
+                int(x + 3),
+                self.top_height - 4,
+                text if text else "?"
+            )
+
         painter.setPen(
             QPen(
                 QColor(
@@ -5953,9 +6135,9 @@ class PianoRoll(QWidget):
 
             painter.drawLine(
                 int(x),
-                self.top_height - 13,
+                self.top_height - 42,
                 int(x),
-                self.top_height
+                self.top_height - 30
             )
 
             disp_bpm = (
@@ -5964,7 +6146,7 @@ class PianoRoll(QWidget):
 
             painter.drawText(
                 int(x + 3),
-                self.top_height - 13,
+                self.top_height - 30,
                 f"BPM{disp_bpm:g}"
             )
 
@@ -6010,14 +6192,14 @@ class PianoRoll(QWidget):
 
             painter.drawLine(
                 int(x),
-                self.top_height - 4,
+                self.top_height - 29,
                 int(x),
-                self.top_height
+                self.top_height - 17
             )
 
             painter.drawText(
                 int(x + 3),
-                self.top_height - 4,
+                self.top_height - 17,
                 f"{num}/{den}"
             )
 
