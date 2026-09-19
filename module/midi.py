@@ -1027,6 +1027,27 @@ class MidiData:
             num
         )
 
+    def measure_start_beat_at(self, time):
+        """指定時刻が含まれる小節の開始拍(beat)と小節長(beats)を返す"""
+        self._ensure_caches()
+        beat = self.time_to_beat(max(0.0, time))
+        sigs = self.time_signatures
+        if not sigs:
+            m_idx = int(math.floor(beat / 4.0 + 1e-6))
+            return m_idx * 4.0, 4.0
+        i = bisect.bisect_right(self._sig_times, max(0.0, time)) - 1
+        i = max(0, i)
+        num = max(1, int(sigs[i][1]))
+        den = max(1, int(sigs[i][2]))
+        bar = self.bar_length_beats(num, den)
+        seg_start = self.time_to_beat(sigs[i][0])
+        off = max(0.0, beat - seg_start)
+        snapped = round(off)
+        if abs(off - snapped) < 1e-6:
+            off = float(snapped)
+        m_idx = int(math.floor(off / bar + 1e-6))
+        return seg_start + m_idx * bar, bar
+
     def segment_start_measure(self, index):
         """拍子セグメント開始時点の累積小節数を返す"""
         self._ensure_caches()

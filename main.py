@@ -3742,6 +3742,61 @@ class MainWindow(QMainWindow):
         if hasattr(self.editor, "auto_scroll"):
             self.editor.auto_scroll()
 
+def _refresh_taskbar_icon(window):
+    """Windowsのタスクバーボタンへアプリのアイコンを確実に反映させる。
+
+    起動直後、タスクバーのボタンが既定アイコンのまま作られ、
+    フォーカスやクリックなどの操作があるまで更新されないことがある
+    (Qt + Windows 10/11の既知の挙動)。show()後にネイティブウィンドウへ
+    アイコンを再設定し、一度隠して再表示させることで、操作なしでも
+    タスクバーへ即座に反映させる。
+    """
+    if not sys.platform.startswith("win"):
+        return
+
+    from PySide6.QtWidgets import QApplication
+
+    icon_path = get_resource_path(os.path.join("Assets", "icon.ico"))
+    if not os.path.exists(icon_path):
+        return
+
+    icon = QIcon(icon_path)
+
+    app = QApplication.instance()
+
+    window.setWindowIcon(icon)
+    if app is not None:
+        app.setWindowIcon(icon)
+
+    # ネイティブウィンドウを確実に生成し、WM_SETICON経由で
+    # タスクバーボタンのアイコンを再設定する
+    window.winId()
+    handle = window.windowHandle()
+    if handle is not None:
+        handle.setIcon(icon)
+
+    if app is not None:
+        app.processEvents()
+
+    # タスクバーボタンは初回表示時にアイコンを固定してしまうことがあるため、
+    # 一度隠して再表示してボタンを再生成させる
+    was_maximized = window.isMaximized()
+    was_fullscreen = window.isFullScreen()
+
+    window.hide()
+    if app is not None:
+        app.processEvents()
+
+    if was_fullscreen:
+        window.showFullScreen()
+    elif was_maximized:
+        window.showMaximized()
+    else:
+        window.show()
+
+    if app is not None:
+        app.processEvents()
+
 if __name__ == "__main__":
     try:
         myappid = "wavenote.midi.editor.v2"
@@ -3816,6 +3871,8 @@ if __name__ == "__main__":
 
     window = MainWindow(initial_file=initial_file)
     window.show()
+
+    _refresh_taskbar_icon(window)
 
     ret = app.exec()
     import os

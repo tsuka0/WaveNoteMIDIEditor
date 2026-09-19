@@ -68,6 +68,7 @@ class PianoRoll(QWidget):
             (tr("付点16分音符", "Dotted sixteenth note"), 0.375),
             (tr("16分音符", "Sixteenth note"), 0.25),
             (tr("16分3連音符", "Sixteenth triplet"), 1.0 / 6.0),
+            (tr("付点32分音符", "Dotted thirty-second note"), 0.1875),
             (tr("32分音符", "Thirty-second note"), 0.125),
             (tr("32分3連音符", "Thirty-second triplet"), 1.0 / 12.0),
             (tr("付点64分音符", "Dotted sixty-fourth note"), 0.09375),
@@ -440,25 +441,9 @@ class PianoRoll(QWidget):
         self,
         value
     ):
-        grid = self._note_placement_grid()
-
-        beat = self.midi.time_to_beat(
-            max(
-                0.0,
-                value
-            )
-        )
-
-        snapped = round(
-            beat /
-            grid
-        ) * grid
-
-        return max(
-            0.0,
-            self.midi.beat_to_time(
-                snapped
-            )
+        return self.snap_time(
+            value,
+            mode="round"
         )
 
     def scrub(self, x):
@@ -604,28 +589,8 @@ class PianoRoll(QWidget):
         self,
         duration=None
     ):
-        """付点音符(X * 1.5)を配置するときのスナップグリッドを返す。
-
-        付点16分(0.375拍)などの付点音符は、そのままの長さをグリッドに
-        すると 0.375, 1.125, ... と16分のグリッドから半端にずれた位置に
-        吸着してしまう。そこで基準となる分割(X=0.25拍)のグリッドへ吸着
-        させ、小節の頭を基準とした16分単位の位置へ配置されるようにする。
-        長さ自体は付点のまま変えない。
-        """
         if duration is None:
-            duration = self.note_length
-
-        base = duration / 1.5
-
-        if base > 0:
-            v = base
-            while v < 1.0:
-                v *= 2.0
-            while v >= 2.0:
-                v *= 0.5
-            if abs(v - 1.0) <= 1e-9:
-                return base
-
+            return self.note_length
         return duration
 
     def snap_time(
@@ -636,7 +601,7 @@ class PianoRoll(QWidget):
     ):
         import math
         if grid is None:
-            grid = self._note_placement_grid()
+            grid = self.note_length
 
         t = max(
             0.0,
@@ -680,14 +645,18 @@ class PianoRoll(QWidget):
 
         beat = self.midi.time_to_beat(t)
 
-        units = beat / grid
+        m_start, bar = self.midi.measure_start_beat_at(t)
+        off = max(0.0, beat - m_start)
+        units = off / grid
 
         if mode == "floor":
-            snapped = math.floor(units + tol_units) * grid
+            snapped_units = math.floor(units + tol_units)
         elif mode == "ceil":
-            snapped = math.ceil(units - tol_units) * grid
+            snapped_units = math.ceil(units - tol_units)
         else:
-            snapped = round(units) * grid
+            snapped_units = round(units)
+
+        snapped = m_start + snapped_units * grid
 
         return max(
             0.0,
@@ -1185,7 +1154,7 @@ class PianoRoll(QWidget):
             self.midi.push_undo()
             self._nudge_undo_pushed = True
 
-        grid = self._note_placement_grid()
+        grid = self.note_length
 
         for note in self.selected_notes:
             if d_pitch:
@@ -1205,13 +1174,7 @@ class PianoRoll(QWidget):
                     )
                 )
 
-                new_beat = (
-                    round(
-                        beat /
-                        grid
-                    ) +
-                    d_beats
-                ) * grid
+                new_beat = beat + d_beats * grid
 
                 note.start = max(
                     0.0,
@@ -2675,13 +2638,15 @@ class PianoRoll(QWidget):
             else:
                 original_end = original_start + original_duration
 
+            grid = self.note_length
             new_end = self.snap_time(
                 self.x_to_time(x),
-                grid=self.note_length
+                grid=grid,
+                mode="round"
             )
             
             diff_duration = new_end - original_end
-            min_beats = self.note_length
+            min_beats = min(grid, 0.03125)
             
             if self.drag_original_notes:
                 for n, o_start, o_pitch, o_duration in self.drag_original_notes:
@@ -2744,14 +2709,7 @@ class PianoRoll(QWidget):
                 self.drag_note and
                 self.drag_mode == "resize"
             ):
-                bpm = self.midi.tempo_at(
-                    self.drag_note.start
-                )
-
-                self.placement_beats = (
-                    self.drag_note.duration *
-                    (bpm / 60.0)
-                )
+                pass
 
         if self.drag_note is not None:
             is_duplicate = False
