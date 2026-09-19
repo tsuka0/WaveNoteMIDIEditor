@@ -1037,7 +1037,6 @@ class MainWindow(QMainWindow):
             if exit_on_failure or msg_box.clickedButton() == btn_exit:
                 if QApplication.instance():
                     QApplication.instance().exit(1)
-                import os
                 os._exit(1)
             return False
 
@@ -1075,7 +1074,6 @@ class MainWindow(QMainWindow):
             if exit_on_failure or msg_box.clickedButton() == btn_exit:
                 if QApplication.instance():
                     QApplication.instance().exit(1)
-                import os
                 os._exit(1)
             return False
 
@@ -3003,7 +3001,6 @@ class MainWindow(QMainWindow):
             if exit_on_failure or msg_box.clickedButton() == btn_exit:
                 if QApplication.instance():
                     QApplication.instance().exit(1)
-                import os
                 os._exit(1)
             return False
 
