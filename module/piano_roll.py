@@ -440,7 +440,7 @@ class PianoRoll(QWidget):
         self,
         value
     ):
-        grid = self.note_length
+        grid = self._note_placement_grid()
 
         beat = self.midi.time_to_beat(
             max(
@@ -600,6 +600,34 @@ class PianoRoll(QWidget):
             return self.note_length
         return min_beat
 
+    def _note_placement_grid(
+        self,
+        duration=None
+    ):
+        """付点音符(X * 1.5)を配置するときのスナップグリッドを返す。
+
+        付点16分(0.375拍)などの付点音符は、そのままの長さをグリッドに
+        すると 0.375, 1.125, ... と16分のグリッドから半端にずれた位置に
+        吸着してしまう。そこで基準となる分割(X=0.25拍)のグリッドへ吸着
+        させ、小節の頭を基準とした16分単位の位置へ配置されるようにする。
+        長さ自体は付点のまま変えない。
+        """
+        if duration is None:
+            duration = self.note_length
+
+        base = duration / 1.5
+
+        if base > 0:
+            v = base
+            while v < 1.0:
+                v *= 2.0
+            while v >= 2.0:
+                v *= 0.5
+            if abs(v - 1.0) <= 1e-9:
+                return base
+
+        return duration
+
     def snap_time(
         self,
         value,
@@ -608,7 +636,7 @@ class PianoRoll(QWidget):
     ):
         import math
         if grid is None:
-            grid = self.note_length
+            grid = self._note_placement_grid()
 
         t = max(
             0.0,
@@ -1157,7 +1185,7 @@ class PianoRoll(QWidget):
             self.midi.push_undo()
             self._nudge_undo_pushed = True
 
-        grid = self.note_length
+        grid = self._note_placement_grid()
 
         for note in self.selected_notes:
             if d_pitch:
