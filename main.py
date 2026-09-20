@@ -3346,7 +3346,13 @@ class MainWindow(QMainWindow):
             rescan_action = menu.addAction(tr("ライブラリを再読み込み", "Reload Library"))
             rescan_action.triggered.connect(self.rescan_voice_library)
 
-        reveal_action = menu.addAction(tr("エクスプローラーでフォルダを表示", "Show in Explorer"))
+        if sys.platform.startswith("win"):
+            reveal_text = tr("エクスプローラーでフォルダを表示", "Show in Explorer")
+        elif sys.platform == "darwin":
+            reveal_text = tr("Finderでフォルダを表示", "Show in Finder")
+        else:
+            reveal_text = tr("ファイルマネージャーでフォルダを表示", "Show in File Manager")
+        reveal_action = menu.addAction(reveal_text)
         reveal_action.triggered.connect(self.reveal_voice_library_in_explorer)
 
         if VoiceLibrary.get_instance().folder_path:
@@ -3783,11 +3789,12 @@ def _refresh_taskbar_icon(window):
         pass
 
 if __name__ == "__main__":
-    try:
-        myappid = "wavenote.midi.editor.v2"
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-    except Exception:
-        pass
+    if sys.platform.startswith("win"):
+        try:
+            myappid = "wavenote.midi.editor.v2"
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+        except Exception:
+            pass
 
     from PySide6.QtCore import qInstallMessageHandler, QtMsgType
     def qt_message_handler(mode, context, message):
