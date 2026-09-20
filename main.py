@@ -188,7 +188,7 @@ def apply_toggle_style(btn, checked_color, off_color=None):
             )
 
     btn.toggled.connect(update_style)
-    QTimer.singleShot(0, lambda: update_style(btn.isChecked()))
+    update_style(btn.isChecked())
 
     app = QApplication.instance()
     if app is not None and hasattr(app, "paletteChanged"):
@@ -3743,18 +3743,9 @@ class MainWindow(QMainWindow):
             self.editor.auto_scroll()
 
 def _refresh_taskbar_icon(window):
-    """Windowsのタスクバーボタンへアプリのアイコンを確実に反映させる。
-
-    起動直後、タスクバーのボタンが既定アイコンのまま作られ、
-    フォーカスやクリックなどの操作があるまで更新されないことがある
-    (Qt + Windows 10/11の既知の挙動)。show()後にネイティブウィンドウへ
-    アイコンを再設定し、一度隠して再表示させることで、操作なしでも
-    タスクバーへ即座に反映させる。
-    """
+    """Windowsのタスクバーボタンへアプリのアイコンを確実に反映させる。"""
     if not sys.platform.startswith("win"):
         return
-
-    from PySide6.QtWidgets import QApplication
 
     icon_path = get_resource_path(os.path.join("Assets", "icon.ico"))
     if not os.path.exists(icon_path):
@@ -3768,34 +3759,28 @@ def _refresh_taskbar_icon(window):
     if app is not None:
         app.setWindowIcon(icon)
 
-    # ネイティブウィンドウを確実に生成し、WM_SETICON経由で
-    # タスクバーボタンのアイコンを再設定する
-    window.winId()
     handle = window.windowHandle()
     if handle is not None:
         handle.setIcon(icon)
 
-    if app is not None:
-        app.processEvents()
+    try:
+        hwnd = int(window.winId())
+        WM_SETICON = 0x0080
+        ICON_SMALL = 0
+        ICON_BIG = 1
+        IMAGE_ICON = 1
+        LR_LOADFROMFILE = 0x0010
 
-    # タスクバーボタンは初回表示時にアイコンを固定してしまうことがあるため、
-    # 一度隠して再表示してボタンを再生成させる
-    was_maximized = window.isMaximized()
-    was_fullscreen = window.isFullScreen()
-
-    window.hide()
-    if app is not None:
-        app.processEvents()
-
-    if was_fullscreen:
-        window.showFullScreen()
-    elif was_maximized:
-        window.showMaximized()
-    else:
-        window.show()
-
-    if app is not None:
-        app.processEvents()
+        user32 = ctypes.windll.user32
+        abs_icon_path = os.path.abspath(icon_path)
+        h_icon_big = user32.LoadImageW(None, abs_icon_path, IMAGE_ICON, 32, 32, LR_LOADFROMFILE)
+        h_icon_small = user32.LoadImageW(None, abs_icon_path, IMAGE_ICON, 16, 16, LR_LOADFROMFILE)
+        if h_icon_big:
+            user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, h_icon_big)
+        if h_icon_small:
+            user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, h_icon_small)
+    except Exception:
+        pass
 
 if __name__ == "__main__":
     try:

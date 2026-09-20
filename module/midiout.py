@@ -1,223 +1,153 @@
-import ctypes
+import sys
 import threading
-import time
-from ctypes import wintypes
-
-MMSYSERR_NOERROR = 0
-CALLBACK_NULL = 0
-
-winmm = ctypes.WinDLL("winmm")
-
-winmm.midiOutGetNumDevs.restype = ctypes.c_uint
-
-winmm.midiOutOpen.argtypes = [
-    ctypes.POINTER(ctypes.c_void_p),
-    ctypes.c_uint,
-    ctypes.c_void_p,
-    ctypes.c_void_p,
-    ctypes.c_uint,
-]
-winmm.midiOutOpen.restype = ctypes.c_uint
-
-winmm.midiOutShortMsg.argtypes = [
-    ctypes.c_void_p,
-    ctypes.c_uint,
-]
-winmm.midiOutShortMsg.restype = ctypes.c_uint
-
-winmm.midiOutReset.argtypes = [
-    ctypes.c_void_p,
-]
-winmm.midiOutReset.restype = ctypes.c_uint
-
-winmm.midiOutClose.argtypes = [
-    ctypes.c_void_p,
-]
-winmm.midiOutClose.restype = ctypes.c_uint
+import rtmidi
 
 
-class _MidiOutCaps(ctypes.Structure):
-    _fields_ = [
-        ("wMid", wintypes.WORD),
-        ("wPid", wintypes.WORD),
-        ("vDriverVersion", wintypes.DWORD),
-        ("szPname", ctypes.c_wchar * 32),
-        ("wTechnology", wintypes.WORD),
-        ("wVoices", wintypes.WORD),
-        ("wNotes", wintypes.WORD),
-        ("wChannelMask", wintypes.WORD),
-        ("dwSupport", wintypes.DWORD),
-    ]
+def _clean_port_name(port, index):
+    """Windows環境でrtmidiが付加する末尾のインデックス番号 (' 0', ' 1'...) を除去する。"""
+    if sys.platform.startswith("win") and port.endswith(f" {index}"):
+        return port[:-len(f" {index}")]
+    return port
 
 
 def list_ports():
-    ports = []
+    """利用可能なMIDI出力ポート名の一覧を返す。"""
+    try:
+        out = rtmidi.MidiOut()
+        raw_ports = list(out.get_ports())
+        clean_ports = [_clean_port_name(p, i) for i, p in enumerate(raw_ports)]
 
-    count = int(winmm.midiOutGetNumDevs())
+        # 重複がなければ綺麗な名前を使い、同名デバイスがある場合のみ区別番号を付加
+        if len(clean_ports) == len(set(clean_ports)):
+            ports = clean_ports
+        else:
+            seen = {}
+            for name in clean_ports:
+                seen[name] = seen.get(name, 0) + 1
+            ports = [
+                name if seen[name] == 1 else f"{name} ({i})"
+                for i, name in enumerate(clean_ports)
+            ]
 
-    for i in range(count):
-        caps = _MidiOutCaps()
-
-        if (
-            winmm.midiOutGetDevCapsW(
-                i,
-                ctypes.byref(caps),
-                ctypes.sizeof(_MidiOutCaps)
-            ) == MMSYSERR_NOERROR
-        ):
-            ports.append(caps.szPname)
-
-    return ports
-
-
-def _find_device_id(name):
-    count = int(winmm.midiOutGetNumDevs())
-
-    for i in range(count):
-        caps = _MidiOutCaps()
-
-        if (
-            winmm.midiOutGetDevCapsW(
-                i,
-                ctypes.byref(caps),
-                ctypes.sizeof(_MidiOutCaps)
-            ) == MMSYSERR_NOERROR
-        ):
-            if caps.szPname == name:
-                return i
-
-    return None
+        if not sys.platform.startswith("win"):
+            ports.append("WaveNote Virtual Out")
+        return ports
+    except Exception:
+        return []
 
 
 class MidiOutDevice:
     def __init__(self):
-        self._handle = None
+        self._rtmidi = None
         self._active = set()
+        self._port_name = None
 
     def open(self, name):
-        if self._handle is not None:
+        if self._rtmidi is not None and self._rtmidi.is_port_open():
             return True
 
-        device_id = _find_device_id(name)
+        try:
+            self._rtmidi = rtmidi.MidiOut()
 
-        if device_id is None:
-            return False
+            # Linux / macOS の仮想ポート
+            if not sys.platform.startswith("win") and name in ("WaveNote Virtual Out", "WaveNote Out"):
+                self._rtmidi.open_virtual_port("WaveNote Out")
+                self._port_name = name
+                return True
 
-        handle = ctypes.c_void_p()
+            ports = self._rtmidi.get_ports()
 
-        if (
-            winmm.midiOutOpen(
-                ctypes.byref(handle),
-                device_id,
-                None,
-                None,
-                CALLBACK_NULL
-            ) != MMSYSERR_NOERROR
-        ):
-            return False
+            # 1. 完全一致（生名またはクリーン名）
+            for i, port in enumerate(ports):
+                clean = _clean_port_name(port, i)
+                if port == name or clean == name:
+                    self._rtmidi.open_port(i)
+                    self._port_name = port
+                    return True
 
-        self._handle = handle.value
+            # 2. 前方一致・部分一致（互換用）
+            for i, port in enumerate(ports):
+                clean = _clean_port_name(port, i)
+                if (
+                    port.startswith(name)
+                    or name.startswith(port)
+                    or clean.startswith(name)
+                    or name.startswith(clean)
+                ):
+                    self._rtmidi.open_port(i)
+                    self._port_name = port
+                    return True
+        except Exception:
+            self._rtmidi = None
 
-        return True
+        return False
 
     def _send(self, status, data1, data2):
-        if self._handle is None:
-            return
-
-        message = (
-            status |
-            ((data1 & 0x7F) << 8) |
-            ((data2 & 0x7F) << 16)
-        )
-
-        winmm.midiOutShortMsg(
-            self._handle,
-            message
-        )
+        if self._rtmidi is not None and self._rtmidi.is_port_open():
+            try:
+                self._rtmidi.send_message([
+                    int(status) & 0xFF,
+                    max(0, min(127, int(data1))),
+                    max(0, min(127, int(data2))),
+                ])
+            except Exception:
+                pass
 
     def note_on(self, pitch, velocity=100, channel=0):
-        if self._handle is None:
-            return
-
-        self._send(
-            0x90 | (channel & 0x0F),
-            max(0, min(127, pitch)),
-            max(0, min(127, velocity))
-        )
-
-        self._active.add((int(pitch), channel & 0x0F))
+        ch = int(channel) & 0x0F
+        p = max(0, min(127, int(pitch)))
+        v = max(0, min(127, int(velocity)))
+        self._send(0x90 | ch, p, v)
+        self._active.add((p, ch))
 
     def note_off(self, pitch, channel=0):
-        if self._handle is None:
-            return
-
-        self._send(
-            0x80 | (channel & 0x0F),
-            max(0, min(127, pitch)),
-            0
-        )
-
-        self._active.discard((int(pitch), channel & 0x0F))
+        ch = int(channel) & 0x0F
+        p = max(0, min(127, int(pitch)))
+        self._send(0x80 | ch, p, 0)
+        self._active.discard((p, ch))
 
     def control_change(self, control, value, channel=0):
-        if self._handle is None:
-            return
-
-        self._send(
-            0xB0 | (channel & 0x0F),
-            max(0, min(127, control)),
-            max(0, min(127, value))
-        )
+        ch = int(channel) & 0x0F
+        c = max(0, min(127, int(control)))
+        v = max(0, min(127, int(value)))
+        self._send(0xB0 | ch, c, v)
 
     def all_notes_off(self):
-        if self._handle is None:
-            return
-
         for pitch, channel in list(self._active):
-            self._send(
-                0x80 | channel,
-                max(0, min(127, pitch)),
-                0
-            )
-
+            self._send(0x80 | channel, pitch, 0)
         self._active.clear()
 
         for channel in range(16):
-            self._send(0xB0 | channel, 123, 0)
-            self._send(0xB0 | channel, 120, 0)
-            self._send(0xB0 | channel, 64, 0)
+            self._send(0xB0 | channel, 123, 0)  # All Notes Off
+            self._send(0xB0 | channel, 120, 0)  # All Sound Off
+            self._send(0xB0 | channel, 64, 0)   # Sustain Off
 
     def close(self):
-        if self._handle is None:
-            return
+        try:
+            self.all_notes_off()
+        except Exception:
+            pass
 
-        self.all_notes_off()
+        if self._rtmidi is not None:
+            try:
+                if self._rtmidi.is_port_open():
+                    self._rtmidi.close_port()
+            except Exception:
+                pass
+            self._rtmidi = None
 
-        winmm.midiOutReset(self._handle)
-
-        time.sleep(0.05)
-
-        winmm.midiOutClose(self._handle)
-
-        self._handle = None
         self._active.clear()
+        self._port_name = None
 
 
 class MidiOutManager:
-    """複数のAudioDataインスタンスで1つのMIDI出力デバイスを共有する。
-
-    OmniMIDIのような仮想MIDIデバイスは同時に1つのクライアントしか
-    開けないことがある。トラックごとのAudioDataが独自のハンドルを開くと
-    2つ目のmidiOutOpenが失敗してデバイスを開けなくなるため、ここで
-    デバイス名ごとに1つのハンドルを参照カウントで共有する。
-    """
+    """複数のAudioDataインスタンスで1つのMIDI出力デバイスを共有する。"""
 
     def __init__(self):
         self._lock = threading.Lock()
         self._devices = {}
 
     def acquire(self, name):
-        device = None
         with self._lock:
             entry = self._devices.get(name)
             if entry is None:
@@ -232,9 +162,7 @@ class MidiOutManager:
     def release(self, name, device):
         with self._lock:
             entry = self._devices.get(name)
-            if entry is None:
-                return
-            if entry[0] is not device:
+            if entry is None or entry[0] is not device:
                 return
             entry[1] -= 1
             if entry[1] <= 0:

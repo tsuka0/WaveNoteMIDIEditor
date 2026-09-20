@@ -1,4 +1,4 @@
-﻿
+
 <p align="center">
   <img src="./Assets/icon.ico" width="128">
 </p>
@@ -29,9 +29,9 @@
 
 ## 動作環境
 
-- Windows 10 / 11
+- Windows 10 / 11 / Linux / macOS
 - Python 3.10 以降
-- MIDI出力はWindowsのwinmm APIを使用します。
+- MIDI出力は `python-rtmidi` によるクロスプラットフォーム出力（Windows / Linux / macOS）を使用します。
 
 ## 基本的な使い方
 
@@ -126,7 +126,7 @@ MIDIファイルを読み込んだ場合は、そのMIDIに含まれるテンポ
 | `module/audio.py` | 音声読み込み、再生、内蔵音源レンダリング |
 | `module/spectrum.py` | CQTスペクトラムとテンポ・拍位置解析 |
 | `module/midi.py` | MIDIデータ、テンポ・拍子モデル、入出力、編集履歴 |
-| `module/midiout.py` | Windows MIDI出力デバイスの列挙・送信 |
+| `module/midiout.py` | MIDI出力デバイス（Windows / Linux / macOS）の列挙・送信 |
 | `module/settings.py` | アプリケーション設定の保存・読み込み |
 | `module/discord_rpc.py` | Discord Rich Presence 通信機能 |
 
@@ -135,7 +135,7 @@ MIDIファイルを読み込んだ場合は、そのMIDIに含まれるテンポ
 
 ## 依存パッケージ
 
-主要な依存関係は `PySide6`、`librosa`、`numpy`、`sounddevice`、`mido` です。完全な一覧は [requirements.txt](requirements.txt) を参照してください。
+主要な依存関係は `PySide6`、`librosa`、`numpy`、`sounddevice`、`mido`、`python-rtmidi` です。完全な一覧は [requirements.txt](requirements.txt) を参照してください。
 
 ## プロジェクトのexe化コマンド
 ```
