@@ -1745,10 +1745,23 @@ class MainWindow(QMainWindow):
         self.sync_preset_combo()
 
 
+    def set_output_device(self, device):
+        """全トラックおよび全体音声で共通のMIDI出力デバイスを設定する。"""
+        self._global_audio.set_output_device(device)
+        for ta in self.track_audio.values():
+            if ta is not self._global_audio:
+                ta.set_output_device(device)
+        if self.audio is not self._global_audio:
+            self.audio.set_output_device(device)
+        save_value(
+            "midi_out_device",
+            self._global_audio.output_device
+        )
+
     def open_settings(self):
         dialog = SettingsDialog(
             self,
-            self.audio.output_device
+            self._global_audio.output_device
         )
 
         if dialog.exec() != QDialog.Accepted:
@@ -1756,13 +1769,11 @@ class MainWindow(QMainWindow):
 
         device = dialog.output_device()
 
-        self.audio.set_output_device(
-            device
-        )
+        self.set_output_device(device)
 
         if (
             device != "internal" and
-            self.audio.output_device == "internal"
+            self._global_audio.output_device == "internal"
         ):
             QMessageBox.warning(
                 self,
@@ -1773,10 +1784,6 @@ class MainWindow(QMainWindow):
                 )
             )
 
-        save_value(
-            "midi_out_device",
-            self.audio.output_device
-        )
         self.update_auto_backup_timer()
 
         if dialog.language_changed():
@@ -2004,6 +2011,10 @@ class MainWindow(QMainWindow):
             self.audio = target
 
             self.editor.set_audio(target)
+
+        # MIDIOUT設定は全トラックで共通に保つ
+        if target.output_device != self._global_audio.output_device:
+            target.set_output_device(self._global_audio.output_device)
 
         self._maybe_load_active_audio()
 

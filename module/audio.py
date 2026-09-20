@@ -1,6 +1,7 @@
 import threading
 import time
 import bisect
+import weakref
 import numpy as np
 import sounddevice as sd
 import scipy.signal
@@ -14,7 +15,11 @@ EQ_LOW_CROSSOVER_HZ = 400.0
 EQ_HIGH_CROSSOVER_HZ = 2500.0
 
 class AudioData:
+    _shared_output_device = "internal"
+    _active_instances = weakref.WeakSet()
+
     def __init__(self):
+        AudioData._active_instances.add(self)
         self.y = None
         self.y_raw = None
         self.sr = 44100
@@ -72,7 +77,6 @@ class AudioData:
         self.preview_pitch = None
         self.preview_until = 0.0
 
-        self.output_device = "internal"
         self._midi_out = None
         self._midi_out_name = None
         self._midi_out_preview_pitch = None
@@ -101,6 +105,14 @@ class AudioData:
 
         self._playback_end = None
         self._vocal_track_buffer = None
+
+    @property
+    def output_device(self):
+        return AudioData._shared_output_device
+
+    @output_device.setter
+    def output_device(self, value):
+        AudioData._shared_output_device = value
 
     @property
     def a4_freq(self):
@@ -132,17 +144,21 @@ class AudioData:
 
     def set_output_device(self, device):
         with self._midi_lock:
-            if self.output_device == device:
-                return
-                
-            self.output_device = device
-            self._close_midi_out()
+            AudioData._shared_output_device = device
+
+            # 全インスタンスの既存MIDI出力をクローズ
+            for inst in list(AudioData._active_instances):
+                try:
+                    with inst._midi_lock:
+                        inst._close_midi_out()
+                except Exception:
+                    pass
 
             if device == "internal":
                 return
 
             if not self._open_midi_out():
-                self.output_device = "internal"
+                AudioData._shared_output_device = "internal"
 
     def _open_midi_out(self):
         with self._midi_lock:
