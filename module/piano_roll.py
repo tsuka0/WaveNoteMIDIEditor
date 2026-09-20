@@ -2709,7 +2709,13 @@ class PianoRoll(QWidget):
                 self.drag_note and
                 self.drag_mode == "resize"
             ):
-                pass
+                bpm = self.midi.tempo_at(
+                    self.drag_note.start
+                )
+                self.placement_beats = (
+                    self.drag_note.duration *
+                    (bpm / 60.0)
+                )
 
         if self.drag_note is not None:
             is_duplicate = False

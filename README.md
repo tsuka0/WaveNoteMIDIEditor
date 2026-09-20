@@ -1,4 +1,3 @@
-
 <p align="center">
   <img src="./Assets/icon.ico" width="128">
 </p>
@@ -6,7 +5,7 @@
 # WaveNote MIDI Editor 
 ダウンロードは[こちらから](https://github.com/tsuka0/WaveNoteMIDIEditor/releases/latest)!!
 
-音声ファイルのスペクトラムを確認しながら、MIDIを作成・編集できる Windows 向けピアノロールエディタです。  
+音声ファイルのスペクトラムを確認しながら、MIDIを作成・編集できるピアノロールエディタです（Windows / Linux / macOS 対応）。  
 音声とMIDIを同じタイムラインで扱えるため、耳と視覚の両方を使ってノートを調整できます。  
 
 ## 主な機能
@@ -20,11 +19,15 @@
   - 推定テンポをグリッドとテンポ入力欄に反映
   - 音声オフセットは自動変更しません
 - MIDIの作成・読み込み・保存 (`.mid` / `.midi`)
+- Synthesizer V プロジェクト (`.svp`) の読み込み（トラック・ノート・テンポ・拍子）
+- UTAU音声ライブラリの読み込み・プレビュー合成再生、歌詞編集
 - ノートの追加、移動、リサイズ、コピー＆ペースト、削除
 - ベロシティ編集、サステインペダル (CC64) の編集
-- テンポ・拍子の変更および再生位置への追加
+- テンポ・拍子の変更および再生位置への追加、タップテンポ機能
+- 多言語対応（日本語 / 英語）
+- カスタムテーマ・カラー設定
 - 元に戻す / やり直し
-- 内蔵音源または Windows MIDI出力デバイスでの再生
+- 内蔵音源または外部MIDI出力デバイスでの再生（Linuxでは仮想MIDIポートにも対応）
 - プロジェクト保存・読み込み (`.wnp`, gzip圧縮)
 
 ## 動作環境
@@ -32,6 +35,7 @@
 - Windows 10 / 11 / Linux / macOS
 - Python 3.10 以降
 - MIDI出力は `python-rtmidi` によるクロスプラットフォーム出力（Windows / Linux / macOS）を使用します。
+  - Linux環境では、ALSA / JACK / PipeWire 経由で外部音源（FluidSynth等）や仮想ポートに出力できます。
 
 ## 基本的な使い方
 
@@ -61,6 +65,7 @@ MIDIファイルを読み込んだ場合は、そのMIDIに含まれるテンポ
 | `Ctrl` + `C` / `Ctrl` + `X` / `Ctrl` + `V` | ノートのコピー / 切り取り / 貼り付け (貼り付け位置は再生位置・グリッドスナップ) |
 | `Ctrl` + `A` | すべて選択 (全トラック表示時は全ノート、トラック選択時はそのトラック) |
 | `Delete` / `Backspace` | 選択ノートを削除 |
+| `Shift` + `Space` | 選択ノートのみを再生 |
 | 矢印キー | 選択ノートを移動 (左右=1グリッド、上下=半音) |
 | `Shift` + 矢印キー | 選択ノートを大きく移動 (左右=4グリッド、上下=1オクターブ) |
 
@@ -107,7 +112,7 @@ MIDIファイルを読み込んだ場合は、そのMIDIに含まれるテンポ
 
 ## 注意事項
 - テンポ解析は補助機能です。正確な編集の前にグリッド位置を確認してください。
-- 外部MIDIデバイスの利用可否は、Windows側で認識されているデバイスに依存します。
+- 外部MIDIデバイスの利用可否は、OS側で認識されているデバイスに依存します（Linuxで音を鳴らすには FluidSynth などの外部シンセサイザーの起動、または仮想ポートの接続が必要です）。
 - プロジェクトに保存される音声ファイルはパス参照です。音声ファイルを移動・削除すると、プロジェクトから読み込みできなくなります。
 
 ## ファイル形式
@@ -115,6 +120,7 @@ MIDIファイルを読み込んだ場合は、そのMIDIに含まれるテンポ
 | --- | --- | --- |
 | 音声 | `.wav`, `.mp3`, `.flac`, `.ogg`, `.m4a` | 解析・再生用の音声ファイル |
 | MIDI | `.mid`, `.midi` | 読み込み・書き出し可能なMIDIファイル |
+| Synthesizer V | `.svp` | Synthesizer V プロジェクトファイルの読み込み |
 | プロジェクト | `.wnp` | gzip圧縮されたJSON。MIDI、テンポ、拍子、音声パス、表示・再生設定を保存 (従来の非圧縮ファイルも読み込み可能) |
 
 ## プロジェクト構成
@@ -126,9 +132,13 @@ MIDIファイルを読み込んだ場合は、そのMIDIに含まれるテンポ
 | `module/audio.py` | 音声読み込み、再生、内蔵音源レンダリング |
 | `module/spectrum.py` | CQTスペクトラムとテンポ・拍位置解析 |
 | `module/midi.py` | MIDIデータ、テンポ・拍子モデル、入出力、編集履歴 |
-| `module/midiout.py` | MIDI出力デバイス（Windows / Linux / macOS）の列挙・送信 |
+| `module/midiout.py` | MIDI出力デバイスの列挙・送信 |
+| `module/voice_library.py` | UTAU音声ライブラリの読み込み・プレビュー合成 |
 | `module/settings.py` | アプリケーション設定の保存・読み込み |
 | `module/discord_rpc.py` | Discord Rich Presence 通信機能 |
+| `module/i18n.py` | 多言語対応（日本語 / 英語） |
+| `module/taptempo.py` | タップテンポ測定ダイアログ |
+| `module/features.py` | 機能フラグ管理 |
 
 ## Discord Rich Presence
 設定から Discord Rich Presence を有効にすると、Discordのプロフィールに「WaveNoteMIDIEditor」をプレイ中であることを表示できます。
@@ -137,10 +147,12 @@ MIDIファイルを読み込んだ場合は、そのMIDIに含まれるテンポ
 
 主要な依存関係は `PySide6`、`librosa`、`numpy`、`sounddevice`、`mido`、`python-rtmidi` です。完全な一覧は [requirements.txt](requirements.txt) を参照してください。
 
-## プロジェクトのexe化コマンド
-```
+## プロジェクトのビルド
+Windows向けexe化:
+```bash
 pyinstaller main.spec
 ```
+
 ## アイコン制作
 アイコンは[てつ(XIAO)](https://x.com/tt_xiaop)さんに作って頂きました...！  
 ありがとうございます(´;ω;｀)
