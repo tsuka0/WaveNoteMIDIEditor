@@ -427,7 +427,7 @@ class PianoRoll(QWidget):
         )
 
         beats = (
-            self.placement_beats
+            max(self.note_length, self.placement_beats)
             if self.placement_beats is not None
             else self.note_length
         )
@@ -2646,20 +2646,19 @@ class PianoRoll(QWidget):
             )
             
             diff_duration = new_end - original_end
-            min_beats = min(grid, 0.03125)
             
             if self.drag_original_notes:
                 for n, o_start, o_pitch, o_duration in self.drag_original_notes:
-                    bpm = self.midi.tempo_at(o_start)
-                    min_duration = min_beats * (60.0 / bpm)
+                    start_beat = self.midi.time_to_beat(o_start)
+                    min_duration = self.midi.beat_to_time(start_beat + grid) - o_start
                     
                     n.duration = max(
                         min_duration,
                         o_duration + diff_duration
                     )
             else:
-                bpm = self.midi.tempo_at(self.drag_note.start)
-                min_duration = min_beats * (60.0 / bpm)
+                start_beat = self.midi.time_to_beat(self.drag_note.start)
+                min_duration = self.midi.beat_to_time(start_beat + grid) - self.drag_note.start
                 
                 self.drag_note.duration = max(
                     min_duration,
@@ -2712,10 +2711,11 @@ class PianoRoll(QWidget):
                 bpm = self.midi.tempo_at(
                     self.drag_note.start
                 )
-                self.placement_beats = (
+                beats = (
                     self.drag_note.duration *
                     (bpm / 60.0)
                 )
+                self.placement_beats = max(self.note_length, beats)
 
         if self.drag_note is not None:
             is_duplicate = False

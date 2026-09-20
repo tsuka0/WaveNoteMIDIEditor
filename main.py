@@ -3654,7 +3654,7 @@ class MainWindow(QMainWindow):
                 if not path.lower().endswith(".svp"):
                     path += ".svp"
 
-                self.midi.save_svp(path)
+                self.midi.save_svp(path, self.midi.filter_track)
                 self._last_midi_path = path
                 self._last_midi_is_svp = True
                 QMessageBox.information(
@@ -3665,7 +3665,7 @@ class MainWindow(QMainWindow):
             else:
                 if not path.lower().endswith((".mid", ".midi")):
                     path += ".mid"
-                self.midi.save(path)
+                self.midi.save(path, self.midi.filter_track)
                 self._last_midi_path = path
                 self._last_midi_is_svp = False
                 QMessageBox.information(

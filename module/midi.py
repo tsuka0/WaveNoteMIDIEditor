@@ -1281,7 +1281,7 @@ class MidiData:
         self._bump()
         return created
 
-    def save(self, path):
+    def save(self, path, track_index=None):
         """MIDI ファイルに書き出す。
         self.markers (テキストマーカー) はプロジェクト(.wnp)専用であり、
         MIDI ファイルには含めない。
@@ -1370,7 +1370,12 @@ class MidiData:
         # (自動割り当てではチャンネル9=GMドラムを避ける)
         used_channels = set()
 
-        for track_idx, track in enumerate(self.tracks):
+        if track_index is not None and 0 <= track_index < len(self.tracks):
+            tracks_to_export = [(track_index, self.tracks[track_index])]
+        else:
+            tracks_to_export = list(enumerate(self.tracks))
+
+        for track_idx, track in tracks_to_export:
             if not track.notes and not track.pedals:
                 continue
 
@@ -1576,7 +1581,7 @@ class MidiData:
 
         return sec2blink, blick2sec
 
-    def save_svp(self, path):
+    def save_svp(self, path, track_index=None):
         """Synthesizer V Studio (.svp) 形式で書き出す。
 
         実際の .svp ディスク形式 (version数値 / time.tempo・time.meter /
@@ -1663,7 +1668,12 @@ class MidiData:
 
         tracks_out = []
 
-        for index, track in enumerate(self.tracks):
+        if track_index is not None and 0 <= track_index < len(self.tracks):
+            tracks_to_export = [(track_index, self.tracks[track_index])]
+        else:
+            tracks_to_export = list(enumerate(self.tracks))
+
+        for out_idx, (orig_index, track) in enumerate(tracks_to_export):
             group_id = str(uuidlib.uuid4())
 
             notes_out = []
@@ -1688,9 +1698,9 @@ class MidiData:
 
             tracks_out.append(
                 {
-                    "name": track.name or f"Track {index + 1}",
+                    "name": track.name or f"Track {orig_index + 1}",
                     "dispColor": "ff7db235",
-                    "dispOrder": index,
+                    "dispOrder": out_idx,
                     "renderEnabled": True,
                     "mixer": {
                         "gainDecibel": 0.0,
