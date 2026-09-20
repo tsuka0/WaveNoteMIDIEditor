@@ -420,22 +420,19 @@ class PianoRoll(QWidget):
             self.update()
 
     def note_duration(self, start_time=None):
-        bpm = self.midi.tempo_at(
-            start_time
-            if start_time is not None
-            else 0.0
-        )
-
         beats = (
             max(self.note_length, self.placement_beats)
             if self.placement_beats is not None
             else self.note_length
         )
 
-        return (
-            beats *
-            (60.0 / bpm)
-        )
+        if start_time is not None:
+            start_beat = self.midi.time_to_beat(start_time)
+            end_time = self.midi.beat_to_time(start_beat + beats)
+            return max(1e-4, end_time - start_time)
+
+        bpm = self.midi.tempo_at(0.0)
+        return beats * (60.0 / bpm)
 
     def snap_play_position(
         self,
@@ -1174,17 +1171,17 @@ class PianoRoll(QWidget):
                     )
                 )
 
-                new_beat = beat + d_beats * grid
+                m_start, _ = self.midi.measure_start_beat_at(note.start)
+                off = beat - m_start
+                units = round(off / grid)
+                new_beat = max(0.0, m_start + (units + d_beats) * grid)
 
                 note.start = max(
                     0.0,
                     min(
                         self.audio_duration,
                         self.midi.beat_to_time(
-                            max(
-                                0.0,
-                                new_beat
-                            )
+                            new_beat
                         )
                     )
                 )
@@ -2560,22 +2557,26 @@ class PianoRoll(QWidget):
             ):
                 self.press_moved = True
 
-            snapped_start_mouse = self.snap_time(
-                self.x_to_time(
-                    self.drag_start.x()
-                )
+            # マウスの移動量（拍）と代表ノーツの元の拍から、目標開始拍を計算
+            orig_beat = self.midi.time_to_beat(original_start)
+            mouse_start_beat = self.midi.time_to_beat(
+                self.x_to_time(self.drag_start.x())
             )
-            snapped_current_mouse = self.snap_time(
+            mouse_curr_beat = self.midi.time_to_beat(
                 self.x_to_time(x)
             )
+            target_beat = max(0.0, orig_beat + (mouse_curr_beat - mouse_start_beat))
 
-            new_start = (
-                original_start +
-                (
-                    snapped_current_mouse -
-                    snapped_start_mouse
-                )
+            # 目標拍を現在のグリッドに最も近い位置（round）へスナップ
+            grid = self.note_length
+            target_time = self.midi.beat_to_time(target_beat)
+            new_start = self.snap_time(
+                target_time,
+                grid=grid,
+                mode="round"
             )
+            new_beat = self.midi.time_to_beat(new_start)
+            diff_beat = new_beat - orig_beat
 
             new_pitch = (
                 original_pitch -
@@ -2586,16 +2587,19 @@ class PianoRoll(QWidget):
             )
 
             if self.drag_original_notes:
-                time_diff = new_start - original_start
+                min_o_beat = min(
+                    self.midi.time_to_beat(o_start)
+                    for _, o_start, _, _ in self.drag_original_notes
+                )
+                diff_beat = max(-min_o_beat, diff_beat)
                 pitch_diff = new_pitch - original_pitch
 
                 for n, o_start, o_pitch, o_duration in (
                     self.drag_original_notes
                 ):
-                    n.start = max(
-                        0.0,
-                        o_start + time_diff
-                    )
+                    o_beat = self.midi.time_to_beat(o_start)
+                    n_beat = max(0.0, o_beat + diff_beat)
+                    n.start = self.midi.beat_to_time(n_beat)
 
                     n.pitch = max(
                         self.min_pitch,
@@ -2605,10 +2609,7 @@ class PianoRoll(QWidget):
                         )
                     )
             else:
-                self.drag_note.start = max(
-                    0.0,
-                    new_start
-                )
+                self.drag_note.start = new_start
 
                 self.drag_note.pitch = max(
                     self.min_pitch,
@@ -3134,17 +3135,20 @@ class PianoRoll(QWidget):
 
         self.midi.push_undo()
 
-        start_time = self.snap_time(
-            self.play_position
+        rounded_time = self.snap_time(
+            self.play_position,
+            mode="round"
         )
-
-        # スナップにより再生バーより左側に
-        # 貼り付けられる場合は切り上げて補正する
-        if start_time < self.play_position - 1e-6:
+        if abs(rounded_time - self.play_position) < 1e-4:
+            start_time = rounded_time
+        else:
             start_time = self.snap_time(
                 self.play_position,
                 mode="ceil"
             )
+            if start_time < self.play_position - 1e-6:
+                ceil_beat = self.midi.time_to_beat(start_time) + self.note_length
+                start_time = self.midi.beat_to_time(ceil_beat)
 
         if self.clipboard_notes:
             created = (

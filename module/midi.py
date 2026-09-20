@@ -1201,7 +1201,8 @@ class MidiData:
         if not notes:
             return []
 
-        base_time = min(note.start for note in notes)
+        base_beat = min(self.time_to_beat(note.start) for note in notes)
+        start_beat = self.time_to_beat(start_time)
         created = []
         is_all_tracks = (self.filter_track is None)
 
@@ -1215,9 +1216,16 @@ class MidiData:
                 
             track = self.tracks[t_idx]
 
+            note_beat = self.time_to_beat(note.start)
+            dur_beats = self.time_to_beat(note.start + note.duration) - note_beat
+            new_note_beat = max(0.0, start_beat + (note_beat - base_beat))
+            new_start = self.beat_to_time(new_note_beat)
+            new_end = self.beat_to_time(new_note_beat + dur_beats)
+            new_dur = max(1e-4, new_end - new_start)
+
             new_note = Note(
-                note.start - base_time + start_time,
-                note.duration,
+                new_start,
+                new_dur,
                 max(0, min(127, note.pitch + pitch_offset)),
                 note.velocity,
                 track.channel,
@@ -1254,7 +1262,8 @@ class MidiData:
         if not pedals:
             return []
 
-        base_time = min(p.time for p in pedals)
+        base_beat = min(self.time_to_beat(p.time) for p in pedals)
+        start_beat = self.time_to_beat(start_time)
         created = []
         is_all_tracks = (self.filter_track is None)
 
@@ -1268,8 +1277,12 @@ class MidiData:
                 
             track = self.tracks[t_idx]
             
+            pedal_beat = self.time_to_beat(pedal.time)
+            new_pedal_beat = max(0.0, start_beat + (pedal_beat - base_beat))
+            new_pedal_time = self.beat_to_time(new_pedal_beat)
+
             new_pedal = PedalEvent(
-                pedal.time - base_time + start_time,
+                new_pedal_time,
                 pedal.down
             )
             new_pedal._original_track = t_idx
