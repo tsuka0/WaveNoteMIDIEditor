@@ -3636,7 +3636,7 @@ class MainWindow(QMainWindow):
                 progress.show()
                 QApplication.processEvents()
                 
-                self.audio.export_wav(path)
+                self.audio.export_wav(path, self.midi.filter_track)
                 
                 progress.close()
                 QMessageBox.information(

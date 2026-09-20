@@ -1768,25 +1768,47 @@ class AudioData:
         if self.position >= self.max_position():
             self.playing = False
 
-    def export_wav(self, path):
+    def export_wav(self, path, track_index=None):
         import scipy.io.wavfile as wavfile
         import numpy as np
 
-        total_time = self.midi.max_extended_end()
+        # トラック指定の決定: 引数指定があれば優先、なければ現在の self.midi.filter_track を使用
+        if track_index is not None:
+            target_track = track_index if (self.midi is not None and 0 <= track_index < len(self.midi.tracks)) else None
+        else:
+            target_track = (
+                self.midi.filter_track
+                if (self.midi is not None and self.midi.filter_track is not None and 0 <= self.midi.filter_track < len(self.midi.tracks))
+                else None
+            )
+
+        total_time = self.midi.max_extended_end(target_track) if self.midi is not None else 0.0
 
         sample_rate = self.sr
-        total_samples = int(total_time * sample_rate)
+        total_samples = max(0, int(total_time * sample_rate))
 
         out_wave = np.zeros(total_samples, dtype=np.float32)
 
-        # 設定の退避（内部音源を強制、全トラック出力）
+        # 設定の退避（内部音源を強制、選択トラックまたは全トラック出力）
         old_midi_out = self._midi_out
-        old_filter = self.midi.filter_track
+        old_filter = self.midi.filter_track if self.midi is not None else None
+        old_play_all = self.midi.play_all_tracks if self.midi is not None else False
+        old_vocal_buffer = getattr(self, "_vocal_track_buffer", None)
         
         try:
             self._midi_out = None
-            self.midi.filter_track = None
+            if self.midi is not None:
+                self.midi.filter_track = target_track
+                if target_track is not None:
+                    self.midi.play_all_tracks = False
             self._refresh_midi_cache()
+            
+            if self.is_voice_active and self._r_notes:
+                self.voice_lib.cancel_prewarm()
+                self.voice_lib.prewarm_all_sync(self._r_notes, sample_rate, self.VOICE_RELEASE_TIME)
+                self._render_vocal_track_full(total_time, sample_rate)
+            else:
+                self._vocal_track_buffer = None
             
             block_size = 1024
             active_notes = {}
@@ -1817,13 +1839,17 @@ class AudioData:
                 out_wave[i:i+n] = midi_block * 0.35
         finally:
             self._midi_out = old_midi_out
-            self.midi.filter_track = old_filter
+            if self.midi is not None:
+                self.midi.filter_track = old_filter
+                self.midi.play_all_tracks = old_play_all
+            self._vocal_track_buffer = old_vocal_buffer
             self._refresh_midi_cache()
 
-        peak = np.max(np.abs(out_wave))
-        if peak > 0.0:
-            if peak > 0.98:
-                out_wave /= (peak / 0.98)
+        if len(out_wave) > 0:
+            peak = np.max(np.abs(out_wave))
+            if peak > 0.0:
+                if peak > 0.98:
+                    out_wave /= (peak / 0.98)
         
         out_wave_16 = np.int16(out_wave * 32767)
         wavfile.write(path, sample_rate, out_wave_16)

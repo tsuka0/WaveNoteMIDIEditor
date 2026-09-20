@@ -440,10 +440,15 @@ class MidiData:
 
         return result
 
-    def max_extended_end(self):
+    def max_extended_end(self, track_index=None):
         end = 0.0
 
-        for i, track in enumerate(self.tracks):
+        if track_index is not None and 0 <= track_index < len(self.tracks):
+            tracks_to_check = [(track_index, self.tracks[track_index])]
+        else:
+            tracks_to_check = list(enumerate(self.tracks))
+
+        for i, track in tracks_to_check:
             pairs = self.pedal_pairs(i)
 
             if not pairs:
