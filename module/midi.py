@@ -884,7 +884,11 @@ class MidiData:
                 60.0
             )
 
-            cum_time.append(cum_time[-1] + (t1 - t0))
+            # Keep segment boundaries identical to the stored marker times.
+            # Repeatedly adding interval lengths can leave a boundary a few
+            # ULPs away from t1; bisect_right could then select the previous
+            # tempo at the marker itself.
+            cum_time.append(t1)
             cum_beat.append(cum_beat[-1] + beats)
 
         self._tempo_cum_time = cum_time
@@ -1300,6 +1304,7 @@ class MidiData:
         MIDI ファイルには含めない。
         """
         midi = mido.MidiFile(
+            type=1,
             ticks_per_beat=480,
             charset='cp932'
         )
@@ -1463,9 +1468,6 @@ class MidiData:
                     )
                 )
                 
-                if pedal.down:
-                    tick += 1
-
                 events.append(
                     (tick, 2, pedal.down)
                 )
@@ -2050,7 +2052,9 @@ class MidiData:
             new_tracks = [Track()]
 
         self.tracks = new_tracks
-        self.filter_track = 0
+        # A Format 0 file has one source track; after splitting its MIDI
+        # channels into editor tracks, show the complete arrangement together.
+        self.filter_track = None if is_format_0 else 0
         self.beat_phase = 0.0
         self.has_file = True
 
@@ -2138,11 +2142,11 @@ class MidiData:
                 (ticks_per_beat * 1e6)
             )
 
+        # Keep the exact tempo represented by MIDI's integer microseconds per
+        # quarter note. Rounding this BPM internally makes tick-derived times
+        # and beat/time conversions disagree, shifting grid-aligned notes.
         self.tempos = [
-            (
-                ticks_to_seconds(tick),
-                mido.tempo2bpm(tempo)
-            )
+            (ticks_to_seconds(tick), mido.tempo2bpm(tempo))
             for tick, tempo in tempo_ticks
         ]
 
@@ -2188,10 +2192,12 @@ class MidiData:
         ]
 
         new_tracks = []
+        is_format_0 = midi.type == 0
 
         for mtrack in midi.tracks:
             notes = []
             pedals = []
+            pedals_by_channel = {}
             active = {}
             abs_tick = 0
 
@@ -2246,14 +2252,35 @@ class MidiData:
                     msg.type == "control_change" and
                     msg.control == 64
                 ):
-                    pedals.append(
-                        PedalEvent(
-                            ticks_to_seconds(abs_tick),
-                            msg.value >= 64
+                    pedal = PedalEvent(
+                        ticks_to_seconds(abs_tick),
+                        msg.value >= 64
+                    )
+                    if is_format_0:
+                        pedals_by_channel.setdefault(msg.channel, []).append(pedal)
+                    else:
+                        pedals.append(pedal)
+
+            if is_format_0:
+                notes_by_channel = {}
+                for note in notes:
+                    notes_by_channel.setdefault(note.channel, []).append(note)
+
+                channels = sorted(set(notes_by_channel) | set(pedals_by_channel))
+                for channel in channels:
+                    channel_notes = notes_by_channel.get(channel, [])
+                    channel_pedals = pedals_by_channel.get(channel, [])
+                    channel_notes.sort(key=lambda n: (n.start, n.pitch))
+                    base_name = mtrack.name or tr("トラック 1", "Track 1")
+                    new_tracks.append(
+                        Track(
+                            name=f"{base_name} - Ch {channel + 1}",
+                            notes=channel_notes,
+                            pedals=channel_pedals,
+                            channel=channel
                         )
                     )
-
-            if notes or pedals:
+            elif notes or pedals:
                 notes.sort(
                     key=lambda x: (
                         x.start,
@@ -2288,7 +2315,10 @@ class MidiData:
         self.filter_track = 0
         self.has_file = True
 
-        self.ensure_unique_channels()
+        # Format 0 channels are already separated into distinct tracks. Keep
+        # their source channels intact, including channel 10 percussion.
+        if not is_format_0:
+            self.ensure_unique_channels()
 
         self.sort()
         self.extra_state = {}

@@ -633,14 +633,16 @@ class PianoRoll(QWidget):
         else:
             tolerance = 1e-6
 
-        tol_units = (
-            tolerance *
-            bpm /
-            60.0 /
-            grid
-        )
-
         beat = self.midi.time_to_beat(t)
+
+        # Convert the pixel tolerance through the actual tempo map. Using the
+        # BPM at t as a constant approximation can misclassify a snap near a
+        # tempo change, and can push a note one grid step in either direction.
+        beat_tolerance = max(
+            abs(self.midi.time_to_beat(t + tolerance) - beat),
+            abs(beat - self.midi.time_to_beat(max(0.0, t - tolerance)))
+        )
+        tol_units = beat_tolerance / grid if grid > 0 else 0.0
 
         m_start, bar = self.midi.measure_start_beat_at(t)
         off = max(0.0, beat - m_start)
@@ -2970,6 +2972,20 @@ class PianoRoll(QWidget):
             self._ensure_note_cache()
             result = []
 
+            # MIDI note times and snapped grid times can differ by a few
+            # floating-point ULPs after the tick -> seconds -> beat -> seconds
+            # conversions. Keep the left edge inclusive in that case while
+            # preserving the exclusive right edge of the selection range.
+            left_time_tolerance = max(
+                1e-12,
+                math.ulp(t1) * 4
+            ) if t2 > t1 else 0.0
+            right_time_tolerance = max(
+                1e-12,
+                math.ulp(t2) * 4
+            ) if t2 > t1 else 0.0
+            right_time_exclusive = t2 - right_time_tolerance
+
             if self.midi.filter_track is None:
                 track_items = list(
                     enumerate(self.midi.tracks)
@@ -2990,27 +3006,21 @@ class PianoRoll(QWidget):
                     ]
                 )
 
-                i1 = bisect.bisect_left(
-                    starts,
-                    t2
-                )
+                i1 = bisect.bisect_left(starts, right_time_exclusive)
 
                 for note in notes[:i1]:
                     if (
-                        t1 <= note.start < t2 and
+                        t1 - left_time_tolerance <= note.start < right_time_exclusive and
                         p1 <= note.pitch <= p2
                     ):
                         note._original_track = track_index
                         result.append(note)
 
-                li1 = bisect.bisect_left(
-                    long_starts,
-                    t2
-                )
+                li1 = bisect.bisect_left(long_starts, right_time_exclusive)
 
                 for note in long_notes[:li1]:
                     if (
-                        t1 <= note.start < t2 and
+                        t1 - left_time_tolerance <= note.start < right_time_exclusive and
                         p1 <= note.pitch <= p2
                     ):
                         note._original_track = track_index
@@ -5114,6 +5124,14 @@ class PianoRoll(QWidget):
         if self.drag_note is not None:
             drag_ids.add(id(self.drag_note))
 
+        # Build this once per paint pass. Rebuilding it for every track adds
+        # work proportional to tracks x selected notes.
+        sel_set = (
+            {id(note) for note in self.selected_notes}
+            if self.selected_notes
+            else None
+        )
+
         visible_start = max(
             0.0,
             self.scroll_x
@@ -5130,20 +5148,16 @@ class PianoRoll(QWidget):
         )
 
         if self.midi.filter_track is None:
-            track_items = list(
-                enumerate(self.midi.tracks)
-            )
+            track_indices = range(len(self.midi.tracks))
         else:
             index = self.midi.filter_track
 
             if 0 <= index < len(self.midi.tracks):
-                track_items = [
-                    (index, self.midi.tracks[index])
-                ]
+                track_indices = (index,)
             else:
-                track_items = []
+                track_indices = ()
 
-        for track_index, track in track_items:
+        for track_index in track_indices:
             starts, notes, max_duration, long_notes, long_starts = (
                 self._notes_starts_cache[
                     track_index
@@ -5182,16 +5196,11 @@ class PianoRoll(QWidget):
                 self._note_pens[track_index]
             )
 
-            sel_set = (
-                {
-                    id(note)
-                    for note in self.selected_notes
-                }
-                if self.selected_notes
-                else None
-            )
-
-            for note in notes[i0:i1]:
+            # Index the cached arrays directly instead of allocating a sliced
+            # list every frame (large projects can have thousands of visible
+            # notes).
+            for note_index in range(i0, i1):
+                note = notes[note_index]
                 if id(note) in drag_ids:
                     continue
 
@@ -5250,7 +5259,8 @@ class PianoRoll(QWidget):
                     3
                 )
 
-            for note in long_notes[li0:li1]:
+            for note_index in range(li0, li1):
+                note = long_notes[note_index]
                 if id(note) in drag_ids:
                     continue
 
@@ -5310,30 +5320,20 @@ class PianoRoll(QWidget):
                 )
 
         drag_entries = []
+        drag_entry_ids = set()
 
         if self.drag_original_notes:
             for n, _os, _op, _od in self.drag_original_notes:
                 drag_entries.append(n)
+                drag_entry_ids.add(id(n))
 
         if (
             self.drag_note is not None and
-            not any(
-                e is self.drag_note
-                for e in drag_entries
-            )
+            id(self.drag_note) not in drag_entry_ids
         ):
             drag_entries.append(self.drag_note)
 
         if drag_entries:
-            sel_set = (
-                {
-                    id(note)
-                    for note in self.selected_notes
-                }
-                if self.selected_notes
-                else None
-            )
-
             for drag_note in drag_entries:
                 track_index = self._note_track_map.get(
                     id(drag_note),
@@ -6132,9 +6132,11 @@ class PianoRoll(QWidget):
                 self.top_height - 30
             )
 
-            disp_bpm = (
-                math.floor(bpm * 1000.0 + 1e-9) / 1000.0
-            )
+            nearest_integer_bpm = round(bpm)
+            if abs(bpm - nearest_integer_bpm) < 0.001:
+                disp_bpm = nearest_integer_bpm
+            else:
+                disp_bpm = round(bpm, 3)
 
             painter.drawText(
                 int(x + 3),

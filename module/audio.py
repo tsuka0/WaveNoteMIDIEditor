@@ -144,6 +144,13 @@ class AudioData:
 
     def set_output_device(self, device):
         with self._midi_lock:
+            # Settings are commonly saved while playback is active. Reapplying
+            # the already selected device must not close every live MIDI
+            # connection: doing so silences external MIDI playback until a
+            # later worker happens to reopen its port.
+            if device == AudioData._shared_output_device:
+                return
+
             AudioData._shared_output_device = device
 
             # 全インスタンスの既存MIDI出力をクローズ

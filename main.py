@@ -187,6 +187,9 @@ def apply_toggle_style(btn, checked_color, off_color=None):
                 f"QPushButton:hover {{ background-color: {hover_off}; }}"
             )
 
+    # Keep the renderer callable when a checkable button is synchronized with
+    # signals blocked (for example while loading project audio settings).
+    btn._update_toggle_style = update_style
     btn.toggled.connect(update_style)
     update_style(btn.isChecked())
 
@@ -1996,6 +1999,9 @@ class MainWindow(QMainWindow):
             bool(audio.audio_muted)
         )
         self.mute_audio_button.blockSignals(False)
+        self.mute_audio_button._update_toggle_style(
+            self.mute_audio_button.isChecked()
+        )
 
         self.sync_preset_combo()
 
@@ -2246,8 +2252,8 @@ class MainWindow(QMainWindow):
         track = self.midi.tracks[index]
         new_name, ok = QInputDialog.getText(
             self,
-            tr("トラック名の変更", "Rename Track"),
-            tr("新しいトラック名:", "New track name:"),
+            tr("\u30c8\u30e9\u30c3\u30af\u540d\u306e\u5909\u66f4", "Rename Track"),
+            tr("\u65b0\u3057\u3044\u30c8\u30e9\u30c3\u30af\u540d:", "New track name:"),
             text=track.name
         )
 
@@ -3545,9 +3551,7 @@ class MainWindow(QMainWindow):
             self.audio = self._global_audio
             self.editor.set_audio(self._global_audio)
 
-            self.editor.set_track_filter(
-                0
-            )
+            self.editor.set_track_filter(self.midi.filter_track)
 
             self.refresh_track_combo()
             self._tempo_analyzed = False
