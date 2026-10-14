@@ -992,7 +992,7 @@ class MainWindow(QMainWindow):
             self.editor.play_position
         )
 
-        bpm_text = f"BPM {bpm:.0f}"
+        bpm_text = f"BPM {bpm:.3f}".rstrip("0").rstrip(".")
 
         if self.status_bpm_label.text() != bpm_text:
             self.status_bpm_label.setText(bpm_text)
@@ -1539,6 +1539,15 @@ class MainWindow(QMainWindow):
             self.play_all_tracks_button
         )
 
+        self.onion_skin_button = QPushButton(
+            tr("指定のトラックを表示", "Show Selected Tracks")
+        )
+        self.onion_skin_button.setToolTip(
+            tr("選んだ他トラックのノーツを薄く重ねて表示します", "Show selected tracks as translucent onion-skin notes")
+        )
+        self.onion_skin_button.clicked.connect(self.open_onion_skin_settings)
+        toolbar.addWidget(self.onion_skin_button)
+
         toolbar.addSeparator()
         self.voice_lib_label = QLabel()
         self.voice_lib_label.setStyleSheet("color: #64b5f6; font-size: 11px; margin-left: 4px;")
@@ -1842,6 +1851,29 @@ class MainWindow(QMainWindow):
             )
 
         self.track_combo.blockSignals(False)
+
+    def open_onion_skin_settings(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle(tr("表示するトラック", "Tracks to Display"))
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel(tr("薄く重ねて表示するトラックを選択してください", "Choose tracks to show as onion-skin notes")))
+        checks = []
+        selected = self.editor.onion_skin_tracks
+        for index, track in enumerate(self.midi.tracks):
+            check = QCheckBox(track.name)
+            check.setChecked(index in selected)
+            checks.append(check)
+            layout.addWidget(check)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() == QDialog.Accepted:
+            self.editor.onion_skin_tracks = {
+                index for index, check in enumerate(checks) if check.isChecked()
+            }
+            self.editor.update()
 
     def switch_track_by_delta(self, delta):
         idx = self.track_combo.currentIndex() + delta
@@ -3150,7 +3182,7 @@ class MainWindow(QMainWindow):
         hlayout.addWidget(QLabel(tr("新しいテンポ (BPM):", "New tempo (BPM):")))
         tempo_spin = QDoubleSpinBox()
         tempo_spin.setRange(20.0, 999.0)
-        tempo_spin.setDecimals(1)
+        tempo_spin.setDecimals(3)
         tempo_spin.setValue(current_tempo)
         hlayout.addWidget(tempo_spin)
         layout.addLayout(hlayout)

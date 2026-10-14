@@ -128,6 +128,7 @@ class PianoRoll(QWidget):
 
 
         self.selected_notes = []
+        self.onion_skin_tracks = set()
         self.clipboard_notes = []
         self.clipboard_pedals = []
 
@@ -853,10 +854,8 @@ class PianoRoll(QWidget):
             fit is not None and
             fit["n"] >= MIN_TAPS_FOR_APPLY
         ):
-            # 内部では小数点以下も正確に計算し、確定時にのみ
-            # 最も近い整数BPMへ丸める。位相は丸えたBPMに対し
-            # 打鍵位置へ最良一致させる。
-            bpm_value = float(math.floor(fit["bpm"] + 0.5))
+            # Store the measured tempo to MIDI's practical precision.
+            bpm_value = round(float(fit["bpm"]), 3)
             phi = self.tap_engine.fit_phase(bpm_value)
 
             if phi is None:
@@ -1811,6 +1810,17 @@ class PianoRoll(QWidget):
         )
 
         if note:
+            if event.modifiers() & Qt.ControlModifier:
+                if note in self.selected_notes:
+                    self.selected_notes.remove(note)
+                else:
+                    self.selected_notes.append(note)
+                self.selection_rect = None
+                self.last_selection_time_range = None
+                self.last_selection_in_pedal = False
+                self.update()
+                return
+
             note_end_x = self.time_to_x(
                 note.start +
                 note.duration
@@ -2229,9 +2239,9 @@ class PianoRoll(QWidget):
 
         spin = QDoubleSpinBox()
         spin.setRange(20.0, 999.0)
-        spin.setDecimals(0)
+        spin.setDecimals(3)
         spin.setSuffix(" BPM")
-        spin.setValue(round(bpm))
+        spin.setValue(bpm)
         layout.addWidget(spin)
 
         del_check = QCheckBox(
@@ -5148,16 +5158,26 @@ class PianoRoll(QWidget):
         )
 
         if self.midi.filter_track is None:
-            track_indices = range(len(self.midi.tracks))
+            track_indices = list(range(len(self.midi.tracks)))
         else:
             index = self.midi.filter_track
 
-            if 0 <= index < len(self.midi.tracks):
-                track_indices = (index,)
-            else:
-                track_indices = ()
+            track_indices = (
+                [index] if 0 <= index < len(self.midi.tracks) else []
+            )
+            track_indices.extend(
+                track_index for track_index in sorted(self.onion_skin_tracks)
+                if 0 <= track_index < len(self.midi.tracks) and track_index != index
+            )
 
         for track_index in track_indices:
+            is_onion_track = (
+                self.midi.filter_track is not None and
+                track_index != self.midi.filter_track
+            )
+            painter.save()
+            if is_onion_track:
+                painter.setOpacity(0.42)
             starts, notes, max_duration, long_notes, long_starts = (
                 self._notes_starts_cache[
                     track_index
@@ -5318,6 +5338,8 @@ class PianoRoll(QWidget):
                     3,
                     3
                 )
+
+            painter.restore()
 
         drag_entries = []
         drag_entry_ids = set()
@@ -5650,6 +5672,11 @@ class PianoRoll(QWidget):
                 continue
 
             note_class = pitch % 12
+            is_placing_pitch = (
+                self.drag_note is not None and
+                self.drag_mode == "move" and
+                pitch == self.drag_note.pitch
+            )
 
             octave = (
                 pitch //
@@ -5702,6 +5729,16 @@ class PianoRoll(QWidget):
                         )
                     )
                 )
+
+            if is_placing_pitch:
+                painter.fillRect(
+                    0,
+                    int(y),
+                    self.left_width,
+                    self.note_height,
+                    QColor(220, 55, 65)
+                )
+                painter.setPen(QPen(QColor(255, 255, 255)))
 
             painter.drawRect(
                 0,

@@ -1330,7 +1330,9 @@ class MidiData:
             events.append(
                 (
                     tick,
-                    ("set_tempo", mido.bpm2tempo(bpm)),
+                    # MIDI stores microseconds per quarter note as an integer.
+                    # Convert from BPM with explicit rounding for stable precision.
+                    ("set_tempo", int(round(60_000_000 / float(bpm)))),
                 )
             )
 
