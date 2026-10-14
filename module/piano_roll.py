@@ -5177,7 +5177,7 @@ class PianoRoll(QWidget):
             )
             painter.save()
             if is_onion_track:
-                painter.setOpacity(0.42)
+                painter.setOpacity(0.80)
             starts, notes, max_duration, long_notes, long_starts = (
                 self._notes_starts_cache[
                     track_index

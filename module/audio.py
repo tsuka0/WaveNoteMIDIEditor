@@ -2,6 +2,10 @@ import threading
 import time
 import bisect
 import weakref
+import os
+import shutil
+import subprocess
+import tempfile
 import numpy as np
 import sounddevice as sd
 import scipy.signal
@@ -210,12 +214,44 @@ class AudioData:
 
     def load(self, path):
         self.stop()
+        video_extensions = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}
+        if os.path.splitext(path)[1].lower() in video_extensions:
+            ffmpeg = shutil.which("ffmpeg")
+            if not ffmpeg:
+                raise RuntimeError(
+                    "Video audio import requires FFmpeg. Install FFmpeg and make sure ffmpeg is available on PATH."
+                )
 
-        self.y_raw, self.sr = librosa.load(
-            path,
-            sr=None,
-            mono=False
-        )
+            temp_path = None
+            try:
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
+                    temp_path = temp_file.name
+                result = subprocess.run(
+                    [
+                        ffmpeg, "-y", "-v", "error", "-i", path,
+                        "-map", "0:a:0", "-vn", "-c:a", "pcm_s16le", temp_path
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False
+                )
+                if result.returncode != 0:
+                    detail = result.stderr.strip() or "No readable audio track was found."
+                    raise RuntimeError(f"Could not read audio from video:\n{detail}")
+                self.y_raw, self.sr = librosa.load(
+                    temp_path,
+                    sr=None,
+                    mono=False
+                )
+            finally:
+                if temp_path and os.path.exists(temp_path):
+                    os.remove(temp_path)
+        else:
+            self.y_raw, self.sr = librosa.load(
+                path,
+                sr=None,
+                mono=False
+            )
         
         self.apply_dsp()
 

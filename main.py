@@ -3431,7 +3431,9 @@ class MainWindow(QMainWindow):
             self,
             tr("オーディオを開く", "Open Audio"),
             load_last_dir(),
-            "Audio Files (*.wav *.mp3 *.flac *.ogg *.m4a);;All Files (*)"
+            "Audio and Video Files (*.wav *.mp3 *.flac *.ogg *.m4a *.mp4 *.mov *.m4v *.avi *.mkv *.webm);;"
+            "Audio Files (*.wav *.mp3 *.flac *.ogg *.m4a);;"
+            "Video Files (*.mp4 *.mov *.m4v *.avi *.mkv *.webm);;All Files (*)"
         )
 
         if path:
