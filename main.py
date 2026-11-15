@@ -443,6 +443,13 @@ class SettingsDialog(QDialog):
         if grid_idx >= 0:
             self.grid_combo.setCurrentIndex(grid_idx)
 
+        self.bpm_analysis_cb = QCheckBox(
+            tr("音声読み込み時にBPMを自動解析する", "Analyze BPM automatically when loading audio")
+        )
+        self.bpm_analysis_cb.setChecked(
+            load_value("auto_bpm_analysis", "1") == "1"
+        )
+
         self.theme_combo = QComboBox()
         self.theme_combo.addItem(tr("PCに合わせる", "Match System"), "auto")
         self.theme_combo.addItem(tr("白 (Light)", "Light"), "light")
@@ -462,6 +469,7 @@ class SettingsDialog(QDialog):
         form.addRow(tr("間隔", "Interval"), self.backup_spin)
         form.addRow("Discord", self.discord_cb)
         form.addRow(tr("グリッドの細かさ", "Grid Fineness"), self.grid_combo)
+        form.addRow(tr("BPM自動解析", "Auto BPM Analysis"), self.bpm_analysis_cb)
         form.addRow(tr("ショートカット", "Shortcuts"), self.shortcut_btn)
 
         buttons = QDialogButtonBox(
@@ -499,6 +507,7 @@ class SettingsDialog(QDialog):
         save_value("auto_backup_interval", str(self.backup_spin.value()))
         save_value("discord_rpc_enabled", "1" if self.discord_cb.isChecked() else "0")
         save_value("grid_fineness", self.grid_combo.currentData())
+        save_value("auto_bpm_analysis", "1" if self.bpm_analysis_cb.isChecked() else "0")
         save_value("theme", self.theme_combo.currentData())
         super().accept()
 
@@ -2082,6 +2091,45 @@ class MainWindow(QMainWindow):
 
         return None
 
+    def _auto_bpm_analysis_enabled(self):
+        return (
+            load_value("auto_bpm_analysis", "1")
+            .strip()
+            .lower()
+            in ("1", "true", "yes", "on")
+        )
+
+    def _place_audio_at_second_measure(self, audio, beat_origin):
+        """madmomが検出した曲の開始位置を2小節目の頭へ合わせる。
+
+        beat_origin は音声ファイル先頭を0秒とした場合の、解析で求めた
+        曲の開始位置(最初の拍の時刻)。音声全体をずらして、この位置が
+        2小節目の頭に来るようにオフセットを設定する。
+        """
+        if audio is None or beat_origin is None:
+            return
+
+        try:
+            bar_start, bar_beats = (
+                self.midi.measure_start_beat_at(0.0)
+            )
+            second_measure_time = self.midi.beat_to_time(
+                bar_start + bar_beats
+            )
+            offset = second_measure_time - float(beat_origin)
+        except Exception:
+            return
+
+        if not (-1e9 < offset < 1e9):
+            return
+
+        audio.offset = offset
+
+        if not hasattr(self.midi, "extra_state"):
+            self.midi.extra_state = {}
+
+        self.midi.extra_state["audio_offset"] = offset
+
     def _load_audio_into(
         self,
         audio,
@@ -2103,6 +2151,7 @@ class MainWindow(QMainWindow):
         # 作曲テンポの基準はMIDIファイル(または最初の音声から計測したテンポ)。
         # 最初の音声ロード時のみテンポを解析し、以降の音声では上書きしない。
         analyze_tempo = (
+            self._auto_bpm_analysis_enabled() and
             not self.midi.has_file and
             not self._tempo_analyzed
         )
@@ -2145,7 +2194,13 @@ class MainWindow(QMainWindow):
                         tempo_result = None
 
                     if token == self._analysis_token:
-                        self._pending_tempo_analysis = tempo_result
+                        if tempo_result is not None:
+                            self._pending_tempo_analysis = (
+                                tempo_result,
+                                audio
+                            )
+                        else:
+                            self._pending_tempo_analysis = None
 
                 if token != self._analysis_token:
                     return
@@ -2188,6 +2243,10 @@ class MainWindow(QMainWindow):
             time.sleep(0.01)
 
         progress.close()
+
+        # 解析結果をここで確定する。続けて別の音声を読み込むと
+        # _pending_* がリセットされるため、タイマー任せにしない。
+        self.update_editor()
 
         if restore_params:
             self._apply_params_to_audio(
@@ -2728,6 +2787,11 @@ class MainWindow(QMainWindow):
         self.editor.set_audio(self._global_audio)
 
         self.audio.clear()
+
+        # 新規プロジェクトでは保存された音声設定が無いため、
+        # ツールバーのミュート状態を現在の音声へ引き継ぐ。
+        self.audio.audio_muted = self.mute_audio_button.isChecked()
+
         self.editor.set_midi(self.midi)
         self.editor.clear_audio()
         self.refresh_track_combo()
@@ -2737,6 +2801,7 @@ class MainWindow(QMainWindow):
         self._refresh_timeline_reference()
         self.editor.update_timeline()
         self.editor.update()
+        self._sync_audio_ui()
 
     def _save_project_to_path(self, path):
         try:
@@ -2966,10 +3031,6 @@ class MainWindow(QMainWindow):
                         os.path.abspath(global_resolved) !=
                         os.path.abspath(resolved_audio_file)
                     ):
-                        global_analyzed_tempo = (
-                            not self.midi.has_file and
-                            not self._tempo_analyzed
-                        )
                         self._load_audio_into(
                             self._global_audio,
                             global_resolved,
@@ -2985,9 +3046,6 @@ class MainWindow(QMainWindow):
                                 "muted": project_audio_muted,
                             }
                         )
-                        if global_analyzed_tempo:
-                            self._tempo_analyzed = True
-
                 self._load_audio_into(
                     target_audio,
                     resolved_audio_file,
@@ -3585,6 +3643,10 @@ class MainWindow(QMainWindow):
             self.audio = self._global_audio
             self.editor.set_audio(self._global_audio)
 
+            # MIDI / SVP には音声のミュート設定が含まれないため、
+            # ツールバーのミュート状態を現在の音声へ引き継ぐ。
+            self.audio.audio_muted = self.mute_audio_button.isChecked()
+
             self.editor.set_track_filter(self.midi.filter_track)
 
             self.refresh_track_combo()
@@ -3597,6 +3659,7 @@ class MainWindow(QMainWindow):
             self.editor.update_timeline()
             self.editor.update()
             self._project_path = None
+            self._sync_audio_ui()
             self.update_title()
             VoiceLibrary.get_instance().prewarm_notes(self.midi.notes, self.audio.sr)
 
@@ -3749,7 +3812,10 @@ class MainWindow(QMainWindow):
                 )
             else:
                 if self._pending_tempo_analysis is not None:
-                    bpm, _beat_origin = self._pending_tempo_analysis
+                    (
+                        (bpm, beat_origin),
+                        tempo_audio
+                    ) = self._pending_tempo_analysis
                     self._pending_tempo_analysis = None
 
                     self.midi.set_base_tempo(bpm)
@@ -3763,6 +3829,13 @@ class MainWindow(QMainWindow):
                         1.0
                     )
                     self.editor.bpm = bpm
+
+                    # BPM自動解析が成功した音声は、解析で検出した曲の
+                    # 開始位置が2小節目の頭に来るように配置する。
+                    self._place_audio_at_second_measure(
+                        tempo_audio,
+                        beat_origin
+                    )
 
 
 

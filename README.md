@@ -145,7 +145,7 @@ MIDIファイルを読み込んだ場合は、そのMIDIに含まれるテンポ
 
 ## 依存パッケージ
 
-主要な依存関係は `PySide6`、`librosa`、`numpy`、`sounddevice`、`mido`、`python-rtmidi` です。完全な一覧は [requirements.txt](requirements.txt) を参照してください。
+主要な依存関係は `PySide6`、`librosa`、`madmom`、`numpy`、`sounddevice`、`mido`、`python-rtmidi` です。完全な一覧は [requirements.txt](requirements.txt) を参照してください。
 
 ## プロジェクトのビルド
 Windows向けexe化:
