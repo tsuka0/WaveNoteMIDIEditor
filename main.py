@@ -2330,7 +2330,10 @@ class MainWindow(QMainWindow):
         index = self.track_combo.currentData()
         track = self.midi.tracks[index] if index is not None else None
         dialog = QDialog(self)
-        dialog.setWindowTitle(tr("Track Settings" if track else "Audio File"))
+        dialog.setWindowTitle(
+            tr("トラック設定", "Track Settings")
+            if track else tr("音声ファイル", "Audio File")
+        )
         form = QFormLayout(dialog)
 
         if track is not None:
@@ -2338,10 +2341,10 @@ class MainWindow(QMainWindow):
             program_spin = QSpinBox(dialog)
             program_spin.setRange(0, 127)
             program_spin.setValue(int(getattr(track, "program", 0)))
-            drum_check = QCheckBox(tr("Drum Channel (CH10)"), dialog)
+            drum_check = QCheckBox(tr("ドラムチャンネル (CH10)", "Drum Channel (CH10)"), dialog)
             drum_check.setChecked(bool(getattr(track, "is_drum", False)))
-            form.addRow(tr("Name"), name_edit)
-            form.addRow(tr("Program Change (0-127)"), program_spin)
+            form.addRow(tr("名前", "Name"), name_edit)
+            form.addRow(tr("プログラムチェンジ (0-127)", "Program Change (0-127)"), program_spin)
             form.addRow("", drum_check)
 
         clear_button = QPushButton(tr("\u97f3\u58f0\u30d5\u30a1\u30a4\u30eb\u3092\u6d88\u53bb", "Clear Audio File"), dialog)

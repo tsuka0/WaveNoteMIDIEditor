@@ -2722,9 +2722,42 @@ class PianoRoll(QWidget):
         event
     ):
         if event.button() == Qt.LeftButton and self.pitch_bend_drag is not None:
-            moved = self.pitch_bend_drag["moved"]
+            drag = self.pitch_bend_drag
+            moved = drag["moved"]
             self.pitch_bend_drag = None
             if moved:
+                bend_time, _bend_value, anchor_pitch = self.midi.pitch_bends[drag["index"]]
+                note = next((
+                    note
+                    for track in self.midi.tracks
+                    for note in track.notes
+                    if float(note.pitch) == float(anchor_pitch)
+                    and note.start - 1e-7 <= float(bend_time) <= note.start + note.duration + 1e-7
+                ), None)
+                if note is not None:
+                    selected_time = float(bend_time)
+                    points = list(self.midi.pitch_bends)
+                    for boundary in (note.start, note.start + note.duration):
+                        if abs(boundary - selected_time) >= 1e-7:
+                            matches = [
+                                i for i, point in enumerate(points)
+                                if abs(float(point[0]) - boundary) < 1e-7
+                            ]
+                            if matches:
+                                i = matches[-1]
+                                points[i] = (points[i][0], 0, points[i][2])
+                            else:
+                                points.append((boundary, 0, note.pitch))
+                    reset_before = max(0.0, note.start - 0.001)
+                    reset_after = note.start + note.duration + 0.001
+                    for reset_time in (reset_before, reset_after):
+                        if abs(reset_time - selected_time) >= 1e-7 and not any(
+                            abs(float(point[0]) - reset_time) < 1e-7
+                            for point in points
+                        ):
+                            points.append((reset_time, 0, note.pitch))
+                    points.sort(key=lambda point: float(point[0]))
+                    self.midi.pitch_bends = points
                 self.midi.pitch_bend_line_hidden = True
                 self.midi._bump()
             self.update()
@@ -5528,8 +5561,20 @@ class PianoRoll(QWidget):
         self.midi.push_undo()
         points = list(getattr(self.midi, "pitch_bends", []))
         for boundary in (note.start, note.start + note.duration):
-            if not any(abs(float(p[0]) - boundary) < 1e-7 for p in points):
-                points.append((boundary, int(round(self._pitch_bend_value_at(boundary))), note.pitch))
+            if abs(boundary - time_sec) < 1e-7:
+                continue
+            matches = [i for i, point in enumerate(points) if abs(float(point[0]) - boundary) < 1e-7]
+            if matches:
+                i = matches[-1]
+                points[i] = (points[i][0], 0, points[i][2])
+            else:
+                points.append((boundary, 0, note.pitch))
+        for reset_time in (
+            max(0.0, note.start - 0.001),
+            note.start + note.duration + 0.001,
+        ):
+            if not any(abs(float(p[0]) - reset_time) < 1e-7 for p in points):
+                points.append((reset_time, 0, note.pitch))
         points = [p for p in points if abs(float(p[0]) - time_sec) >= 1e-7]
         points.append((time_sec, current_value, note.pitch))
         points.sort(key=lambda p: float(p[0]))
