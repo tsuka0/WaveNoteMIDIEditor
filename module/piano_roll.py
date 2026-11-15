@@ -2748,29 +2748,16 @@ class PianoRoll(QWidget):
                 ), None)
                 if note is not None:
                     selected_time = float(bend_time)
-                    points = list(bend_points)
-                    for boundary in (note.start, note.start + note.duration):
-                        if abs(boundary - selected_time) >= 1e-7:
-                            matches = [
-                                i for i, point in enumerate(points)
-                                if abs(float(point[0]) - boundary) < 1e-7
-                            ]
-                            if matches:
-                                i = matches[-1]
-                                points[i] = (points[i][0], 0, points[i][2])
-                            else:
-                                points.append((boundary, 0, note.pitch))
-                    reset_before = max(0.0, note.start - 0.001)
-                    reset_after = note.start + note.duration + 0.001
-                    for reset_time in (reset_before, reset_after):
-                        if abs(reset_time - selected_time) >= 1e-7 and not any(
-                            abs(float(point[0]) - reset_time) < 1e-7
-                            for point in points
-                        ):
-                            points.append((reset_time, 0, note.pitch))
-                    points.sort(key=lambda point: float(point[0]))
+                    points = self._isolate_pitch_bend_note(
+                        bend_points,
+                        note.start,
+                        note.start + note.duration,
+                        selected_time,
+                        note.pitch,
+                    )
                     bend_points[:] = points
-                self._set_active_pitch_bend_line_hidden(True)
+                if moved:
+                    self._set_active_pitch_bend_line_hidden(True)
                 self.midi._bump()
             self.update()
             return
@@ -5549,6 +5536,8 @@ class PianoRoll(QWidget):
             return None
         track_index = self.midi.filter_track
         for index, (time_sec, bend, anchor_pitch) in enumerate(self._editable_pitch_bends()):
+            if self._is_pitch_bend_reset_point(time_sec, anchor_pitch):
+                continue
             visible_bend = (
                 self._pitch_bend_value_at(time_sec, track_index)
                 if track_index is not None
@@ -5559,6 +5548,32 @@ class PianoRoll(QWidget):
             if abs(px - x) <= 8 and abs(py - y) <= 8:
                 return index
         return None
+
+    def _is_pitch_bend_reset_point(self, time_sec, anchor_pitch):
+        track_index = self.midi.filter_track
+        tracks = (
+            [self.midi.tracks[track_index]]
+            if track_index is not None and 0 <= track_index < len(self.midi.tracks)
+            else self.midi.tracks
+        )
+        matching_notes = [
+            note
+            for track in tracks
+            for note in track.notes
+            if float(note.pitch) == float(anchor_pitch)
+        ]
+        if any(
+            abs(float(time_sec) - boundary) < 1e-7
+            for note in matching_notes
+            for boundary in (note.start, note.start + note.duration)
+        ):
+            return False
+
+        return any(
+            abs(float(time_sec) - max(0.0, note.start - 0.001)) < 1e-7
+            or abs(float(time_sec) - note.start - note.duration - 0.001) < 1e-7
+            for note in matching_notes
+        )
 
     def _draw_note_pitch_shape(self, painter, note, track_index):
         start = float(note.start)
@@ -5622,28 +5637,59 @@ class PianoRoll(QWidget):
                 return v0 + ratio * (v1 - v0)
         return float(points[-1][1])
 
+    @staticmethod
+    def _isolate_pitch_bend_note(points, note_start, note_end, selected_time, anchor_pitch):
+        points = list(points)
+        points.sort(key=lambda point: float(point[0]))
+        reset_before = max(0.0, note_start - 0.001)
+        reset_after = note_end + 0.001
+        reset_points = (
+            (reset_before, PianoRoll._bend_value_at_points(points, reset_before)),
+            (reset_after, PianoRoll._bend_value_at_points(points, reset_after)),
+        )
+
+        for boundary in (note_start, note_end):
+            if abs(boundary - selected_time) < 1e-7:
+                continue
+            matches = [
+                i for i, point in enumerate(points)
+                if abs(float(point[0]) - boundary) < 1e-7
+            ]
+            if matches:
+                index = matches[-1]
+                points[index] = (points[index][0], 0, points[index][2])
+            else:
+                points.append((boundary, 0, anchor_pitch))
+
+        for reset_time, reset_value in reset_points:
+            if abs(reset_time - selected_time) < 1e-7:
+                continue
+            matches = [
+                i for i, point in enumerate(points)
+                if abs(float(point[0]) - reset_time) < 1e-7
+            ]
+            if matches:
+                index = matches[-1]
+                points[index] = (points[index][0], reset_value, points[index][2])
+            else:
+                points.append((reset_time, reset_value, anchor_pitch))
+
+        points.sort(key=lambda point: float(point[0]))
+        return points
+
     def _add_pitch_bend_point(self, note, x, y):
         time_sec = self.snap_time(self.x_to_time(x), grid=self.note_length, mode="round")
         time_sec = max(note.start, min(note.start + note.duration, time_sec))
         points = self._editable_pitch_bends()
         current_value = int(round(self._bend_value_at_points(points, time_sec)))
         self.midi.push_undo()
-        points = list(points)
-        for boundary in (note.start, note.start + note.duration):
-            if abs(boundary - time_sec) < 1e-7:
-                continue
-            matches = [i for i, point in enumerate(points) if abs(float(point[0]) - boundary) < 1e-7]
-            if matches:
-                i = matches[-1]
-                points[i] = (points[i][0], 0, points[i][2])
-            else:
-                points.append((boundary, 0, note.pitch))
-        for reset_time in (
-            max(0.0, note.start - 0.001),
-            note.start + note.duration + 0.001,
-        ):
-            if not any(abs(float(p[0]) - reset_time) < 1e-7 for p in points):
-                points.append((reset_time, 0, note.pitch))
+        points = self._isolate_pitch_bend_note(
+            points,
+            note.start,
+            note.start + note.duration,
+            time_sec,
+            note.pitch,
+        )
         points = [p for p in points if abs(float(p[0]) - time_sec) >= 1e-7]
         points.append((time_sec, current_value, note.pitch))
         points.sort(key=lambda p: float(p[0]))

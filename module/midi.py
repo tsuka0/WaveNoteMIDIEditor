@@ -1255,11 +1255,45 @@ class MidiData:
         return note
 
     def remove_note(self, note):
+        removed_tracks = []
         for track in self.tracks:
             if note in track.notes:
                 track.notes.remove(note)
+                removed_tracks.append(track)
+
+        if removed_tracks:
+            for track in removed_tracks:
+                track.pitch_bends[:] = self._remove_orphaned_pitch_bends(
+                    track.pitch_bends,
+                    note,
+                    track.notes,
+                )
+            self.pitch_bends[:] = self._remove_orphaned_pitch_bends(
+                self.pitch_bends,
+                note,
+                [remaining for track in self.tracks for remaining in track.notes],
+            )
 
         self._bump()
+
+    @staticmethod
+    def _remove_orphaned_pitch_bends(points, deleted_note, remaining_notes):
+        def belongs_to_note(point, note):
+            return (
+                float(point[2]) == float(note.pitch)
+                and note.start - 0.001 - 1e-7
+                <= float(point[0])
+                <= note.start + note.duration + 0.001 + 1e-7
+            )
+
+        return [
+            point
+            for point in points
+            if not (
+                belongs_to_note(point, deleted_note)
+                and not any(belongs_to_note(point, note) for note in remaining_notes)
+            )
+        ]
 
     def sort(self):
         for track in self.tracks:
