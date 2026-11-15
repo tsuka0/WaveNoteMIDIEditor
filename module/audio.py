@@ -772,17 +772,22 @@ class AudioData:
 
             if filter_track is not None:
                 index = filter_track
-                tracks = [self.midi.tracks[index]] if 0 <= index < len(self.midi.tracks) else []
+                tracks = [(index, self.midi.tracks[index])] if 0 <= index < len(self.midi.tracks) else []
             else:
-                tracks = self.midi.tracks
+                tracks = list(enumerate(self.midi.tracks))
 
-            bend_channels = {
-                int(getattr(note, "channel", track.channel)) & 0x0F
-                for track in tracks for note in track.notes
-                if channel_filter is None or (int(getattr(note, "channel", track.channel)) & 0x0F) == channel_filter
-            }
-            bends = sorted(getattr(self.midi, "pitch_bends", []), key=lambda p: float(p[0]))
-            if bends and bend_channels:
+            for track_index, track in tracks:
+                bends = self.midi.pitch_bends_for_track(track_index)
+                if not bends:
+                    continue
+                bend_channels = {
+                    int(getattr(note, "channel", track.channel)) & 0x0F
+                    for note in track.notes
+                    if channel_filter is None or (int(getattr(note, "channel", track.channel)) & 0x0F) == channel_filter
+                }
+                if not bend_channels:
+                    continue
+
                 def bend_value_at(t):
                     if t <= float(bends[0][0]):
                         return float(bends[0][1])
@@ -812,7 +817,7 @@ class AudioData:
                             events.append((t - start_position, "bend", raw, 0, ch))
 
             pedals = []
-            for track in tracks:
+            for _, track in tracks:
                 if channel_filter is not None and track.channel != channel_filter:
                     continue
                 for pedal in track.pedals:
@@ -1124,31 +1129,42 @@ class AudioData:
             # fallback for external calls if any
             iterable = []
 
-        render_bends = sorted(getattr(self.midi, "pitch_bends", []), key=lambda p: float(p[0])) if self.midi is not None else []
+        render_bends_by_channel = {}
+        if self.midi is not None:
+            for track_index, track in enumerate(self.midi.tracks):
+                bends = self.midi.pitch_bends_for_track(track_index)
+                if not bends:
+                    continue
+                channels = {
+                    int(getattr(note, "channel", track.channel)) & 0x0F
+                    for note in track.notes
+                }
+                for channel in channels:
+                    render_bends_by_channel[channel] = bends
 
-        def render_bend_value(at_time):
-            if not render_bends:
+        def render_bend_value(at_time, bends):
+            if not bends:
                 return 0.0
-            if at_time <= float(render_bends[0][0]):
-                return float(render_bends[0][1])
-            for left, right in zip(render_bends, render_bends[1:]):
+            if at_time <= float(bends[0][0]):
+                return float(bends[0][1])
+            for left, right in zip(bends, bends[1:]):
                 t0, v0 = float(left[0]), float(left[1])
                 t1, v1 = float(right[0]), float(right[1])
                 if t0 <= at_time <= t1:
                     f = 0.0 if t1 <= t0 else (at_time - t0) / (t1 - t0)
                     return v0 + (v1 - v0) * f
-            return float(render_bends[-1][1]) if render_bends else 0.0
+            return float(bends[-1][1])
 
-        def bend_phase_cycles(base_frequency, from_time, to_time):
+        def bend_phase_cycles(base_frequency, from_time, to_time, bends):
             if to_time <= from_time:
                 return 0.0
             boundaries = [from_time]
-            boundaries.extend(float(point[0]) for point in render_bends if from_time < float(point[0]) < to_time)
+            boundaries.extend(float(point[0]) for point in bends if from_time < float(point[0]) < to_time)
             boundaries.append(to_time)
             cycles = 0.0
             for left_time, right_time in zip(boundaries, boundaries[1:]):
                 duration = right_time - left_time
-                v0, v1 = render_bend_value(left_time), render_bend_value(right_time)
+                v0, v1 = render_bend_value(left_time, bends), render_bend_value(right_time, bends)
                 if abs(v1 - v0) < 1e-9:
                     cycles += base_frequency * duration * (2.0 ** (v0 / 12.0))
                 else:
@@ -1166,6 +1182,8 @@ class AudioData:
         )
 
         for index, note in iterable:
+            note_channel = int(getattr(note, "channel", 0)) & 0x0F
+            render_bends = render_bends_by_channel.get(note_channel, [])
             note_start = note.start
             note_end = self.get_note_effective_end(note)
 
@@ -1203,7 +1221,7 @@ class AudioData:
                     bend_values = np.asarray([float(point[1]) for point in render_bends], dtype=np.float32)
                     semitones = np.interp(sample_times, bend_times, bend_values)
                     instantaneous_frequency = frequency * np.power(2.0, semitones / 12.0)
-                    phase_at_first_sample = 2.0 * np.pi * bend_phase_cycles(frequency, note_start, float(sample_times[0]))
+                    phase_at_first_sample = 2.0 * np.pi * bend_phase_cycles(frequency, note_start, float(sample_times[0]), render_bends)
                     phase_buf[0] = phase_at_first_sample
                     if count > 1:
                         phase_buf[1:count] = phase_at_first_sample + np.cumsum(instantaneous_frequency[:-1], dtype=np.float32) * (2.0 * np.pi / sample_rate)

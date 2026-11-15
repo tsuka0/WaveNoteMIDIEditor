@@ -2707,6 +2707,13 @@ class MainWindow(QMainWindow):
                 "audio_params": dict(
                     getattr(track, "audio_params", {})
                 ),
+                "pitch_bends": [
+                    tuple(point)
+                    for point in getattr(track, "pitch_bends", [])
+                ],
+                "pitch_bend_line_hidden": bool(
+                    getattr(track, "pitch_bend_line_hidden", False)
+                ),
             })
 
         return project
@@ -2721,7 +2728,16 @@ class MainWindow(QMainWindow):
                 len(track.pedals)
                 for track in self.midi.tracks
             ),
-            tuple((track.channel, getattr(track, "program", 0), getattr(track, "is_drum", False)) for track in self.midi.tracks),
+            tuple(
+                (
+                    track.channel,
+                    getattr(track, "program", 0),
+                    getattr(track, "is_drum", False),
+                    tuple(tuple(point) for point in getattr(track, "pitch_bends", [])),
+                    bool(getattr(track, "pitch_bend_line_hidden", False)),
+                )
+                for track in self.midi.tracks
+            ),
             tuple(self.midi.tempos),
             tuple(tuple(point) for point in getattr(self.midi, "pitch_bends", [])),
             bool(getattr(self.midi, "pitch_bend_line_hidden", False)),
@@ -2956,6 +2972,20 @@ class MainWindow(QMainWindow):
                 track.audio_file = track_data.get("audio_file", "") or ""
                 track.audio_params = dict(
                     track_data.get("audio_params", {}) or {}
+                )
+                raw_pitch_bends = track_data.get("pitch_bends", [])
+                if isinstance(raw_pitch_bends, list):
+                    track.pitch_bends = [
+                        (
+                            float(point[0]),
+                            float(point[1]),
+                            float(point[2]) if len(point) > 2 else 60.0,
+                        )
+                        for point in raw_pitch_bends
+                        if isinstance(point, (list, tuple)) and len(point) >= 2
+                    ]
+                track.pitch_bend_line_hidden = bool(
+                    track_data.get("pitch_bend_line_hidden", False)
                 )
                 notes_data = track_data.get("notes", [])
                 if isinstance(notes_data, list):

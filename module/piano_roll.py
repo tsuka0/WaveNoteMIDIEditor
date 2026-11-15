@@ -1384,15 +1384,19 @@ class PianoRoll(QWidget):
             bend_hit = self._pitch_bend_point_at(x, y)
             if bend_hit is not None:
                 self.midi.push_undo()
+                bend_points = self._editable_pitch_bends()
                 self.pitch_bend_drag = {
                     "index": bend_hit,
                     "start_y": y,
-                    "start_value": float(self.midi.pitch_bends[bend_hit][1]),
+                    "start_value": float(bend_points[bend_hit][1]),
                     "moved": False,
                 }
                 event.accept()
                 return
-            if event.modifiers() & Qt.ControlModifier:
+            if (
+                event.modifiers() & Qt.ControlModifier and
+                self.midi.filter_track is not None
+            ):
                 note = self.note_at(x, y)
                 if note is not None:
                     self._add_pitch_bend_point(note, x, y)
@@ -2473,11 +2477,12 @@ class PianoRoll(QWidget):
 
         if self.pitch_bend_drag is not None:
             drag = self.pitch_bend_drag
-            point = list(self.midi.pitch_bends[drag["index"]])
+            bend_points = self._editable_pitch_bends()
+            point = list(bend_points[drag["index"]])
             step = int(round((drag["start_y"] - y) / max(1, self.note_height)))
             point[1] = max(-12, min(12, int(round(drag["start_value"])) + step))
-            drag["moved"] = drag["moved"] or point[1] != self.midi.pitch_bends[drag["index"]][1]
-            self.midi.pitch_bends[drag["index"]] = tuple(point)
+            drag["moved"] = drag["moved"] or point[1] != bend_points[drag["index"]][1]
+            bend_points[drag["index"]] = tuple(point)
             self.midi._bump()
             self.audio.invalidate_midi_cache()
             self.update()
@@ -2726,17 +2731,24 @@ class PianoRoll(QWidget):
             moved = drag["moved"]
             self.pitch_bend_drag = None
             if moved:
-                bend_time, _bend_value, anchor_pitch = self.midi.pitch_bends[drag["index"]]
+                bend_points = self._editable_pitch_bends()
+                bend_time, _, anchor_pitch = bend_points[drag["index"]]
+                track_index = self.midi.filter_track
+                tracks = (
+                    [self.midi.tracks[track_index]]
+                    if track_index is not None and 0 <= track_index < len(self.midi.tracks)
+                    else self.midi.tracks
+                )
                 note = next((
                     note
-                    for track in self.midi.tracks
+                    for track in tracks
                     for note in track.notes
                     if float(note.pitch) == float(anchor_pitch)
                     and note.start - 1e-7 <= float(bend_time) <= note.start + note.duration + 1e-7
                 ), None)
                 if note is not None:
                     selected_time = float(bend_time)
-                    points = list(self.midi.pitch_bends)
+                    points = list(bend_points)
                     for boundary in (note.start, note.start + note.duration):
                         if abs(boundary - selected_time) >= 1e-7:
                             matches = [
@@ -2757,8 +2769,8 @@ class PianoRoll(QWidget):
                         ):
                             points.append((reset_time, 0, note.pitch))
                     points.sort(key=lambda point: float(point[0]))
-                    self.midi.pitch_bends = points
-                self.midi.pitch_bend_line_hidden = True
+                    bend_points[:] = points
+                self._set_active_pitch_bend_line_hidden(True)
                 self.midi._bump()
             self.update()
             return
@@ -5348,7 +5360,7 @@ class PianoRoll(QWidget):
                     painter.setPen(outline_pen)
                     painter.setBrush(fill_brush)
 
-                self._draw_note_pitch_shape(painter, note)
+                self._draw_note_pitch_shape(painter, note, track_index)
 
             for note_index in range(li0, li1):
                 note = long_notes[note_index]
@@ -5398,7 +5410,7 @@ class PianoRoll(QWidget):
                     painter.setPen(outline_pen)
                     painter.setBrush(fill_brush)
 
-                self._draw_note_pitch_shape(painter, note)
+                self._draw_note_pitch_shape(painter, note, track_index)
 
             painter.restore()
 
@@ -5476,19 +5488,19 @@ class PianoRoll(QWidget):
                     painter.setPen(outline_pen)
                     painter.setBrush(fill_brush)
 
-                painter.drawRoundedRect(
-                    int(x),
-                    int(y + 2),
-                    max(
-                        1,
-                        int(width)
-                    ),
-                    self.note_height - 4,
-                    3,
-                    3
-                )
+                if self.midi.pitch_bends_for_track(track_index):
+                    self._draw_note_pitch_shape(painter, drag_note, track_index)
+                else:
+                    painter.drawRoundedRect(
+                        int(x),
+                        int(y + 2),
+                        max(1, int(width)),
+                        self.note_height - 4,
+                        3,
+                        3
+                    )
 
-        bend_points = [] if getattr(self.midi, "pitch_bend_line_hidden", False) else sorted(getattr(self.midi, "pitch_bends", []), key=lambda p: float(p[0]))
+        bend_points = [] if self._active_pitch_bend_line_hidden() else self._visible_pitch_bends()
         if bend_points:
             painter.save()
             painter.setPen(QPen(QColor(255, 235, 90, 230), 2))
@@ -5504,23 +5516,58 @@ class PianoRoll(QWidget):
                 painter.drawEllipse(center, 4, 4)
             painter.restore()
 
+    def _editable_pitch_bends(self):
+        track_index = self.midi.filter_track
+        if track_index is None or not 0 <= track_index < len(self.midi.tracks):
+            return self.midi.pitch_bends
+        return self.midi.tracks[track_index].pitch_bends
+
+    def _active_pitch_bend_line_hidden(self):
+        track_index = self.midi.filter_track
+        if track_index is None or not 0 <= track_index < len(self.midi.tracks):
+            return bool(getattr(self.midi, "pitch_bend_line_hidden", False))
+        return bool(getattr(self.midi.tracks[track_index], "pitch_bend_line_hidden", False))
+
+    def _set_active_pitch_bend_line_hidden(self, hidden):
+        track_index = self.midi.filter_track
+        if track_index is None or not 0 <= track_index < len(self.midi.tracks):
+            self.midi.pitch_bend_line_hidden = hidden
+        else:
+            self.midi.tracks[track_index].pitch_bend_line_hidden = hidden
+
+    def _visible_pitch_bends(self):
+        track_index = self.midi.filter_track
+        points = (
+            self.midi.pitch_bends_for_track(track_index)
+            if track_index is not None
+            else sorted(getattr(self.midi, "pitch_bends", []), key=lambda p: float(p[0]))
+        )
+        return points
+
     def _pitch_bend_point_at(self, x, y):
-        if getattr(self.midi, "pitch_bend_line_hidden", False):
+        if self._active_pitch_bend_line_hidden():
             return None
-        for index, (time_sec, bend, anchor_pitch) in enumerate(getattr(self.midi, "pitch_bends", [])):
+        track_index = self.midi.filter_track
+        for index, (time_sec, bend, anchor_pitch) in enumerate(self._editable_pitch_bends()):
+            visible_bend = (
+                self._pitch_bend_value_at(time_sec, track_index)
+                if track_index is not None
+                else bend
+            )
             px = self.time_to_x(float(time_sec))
-            py = self.pitch_to_y(max(self.min_pitch, min(self.max_pitch, float(anchor_pitch) + float(bend)))) + self.note_height / 2
+            py = self.pitch_to_y(max(self.min_pitch, min(self.max_pitch, float(anchor_pitch) + float(visible_bend)))) + self.note_height / 2
             if abs(px - x) <= 8 and abs(py - y) <= 8:
                 return index
         return None
 
-    def _draw_note_pitch_shape(self, painter, note):
+    def _draw_note_pitch_shape(self, painter, note, track_index):
         start = float(note.start)
         end = start + float(note.duration)
+        bends = self.midi.pitch_bends_for_track(track_index)
         times = [start]
         times.extend(
             float(point[0])
-            for point in getattr(self.midi, "pitch_bends", [])
+            for point in bends
             if start < float(point[0]) < end
         )
         times.append(end)
@@ -5531,15 +5578,36 @@ class PianoRoll(QWidget):
         upper = []
         lower = []
         for at_time in times:
-            pitch = max(0.0, min(127.0, float(note.pitch) + self._pitch_bend_value_at(at_time)))
+            pitch = max(0.0, min(127.0, float(note.pitch) + self._pitch_bend_value_at(at_time, track_index)))
             y = self.pitch_to_y(pitch)
             x = self.time_to_x(at_time)
             upper.append(QPointF(x, y + 2))
             lower.append(QPointF(x, y + self.note_height - 2))
+        x_start = self.time_to_x(start)
+        x_end = self.time_to_x(end)
+        painter.save()
+        painter.setClipRect(
+            QRectF(
+                x_start + 0.75,
+                self.top_height,
+                max(0.0, x_end - x_start - 1.5),
+                max(0.0, self.height() - self.top_height - self.bottom_height),
+            ),
+            Qt.IntersectClip,
+        )
         painter.drawPolygon(QPolygonF(upper + list(reversed(lower))))
+        painter.restore()
 
-    def _pitch_bend_value_at(self, time_sec):
-        points = sorted(getattr(self.midi, "pitch_bends", []), key=lambda p: float(p[0]))
+    def _pitch_bend_value_at(self, time_sec, track_index=None):
+        points = (
+            self.midi.pitch_bends_for_track(track_index)
+            if track_index is not None
+            else sorted(getattr(self.midi, "pitch_bends", []), key=lambda p: float(p[0]))
+        )
+        return self._bend_value_at_points(points, time_sec)
+
+    @staticmethod
+    def _bend_value_at_points(points, time_sec):
         if not points:
             return 0.0
         if time_sec <= float(points[0][0]):
@@ -5557,9 +5625,10 @@ class PianoRoll(QWidget):
     def _add_pitch_bend_point(self, note, x, y):
         time_sec = self.snap_time(self.x_to_time(x), grid=self.note_length, mode="round")
         time_sec = max(note.start, min(note.start + note.duration, time_sec))
-        current_value = int(round(self._pitch_bend_value_at(time_sec)))
+        points = self._editable_pitch_bends()
+        current_value = int(round(self._bend_value_at_points(points, time_sec)))
         self.midi.push_undo()
-        points = list(getattr(self.midi, "pitch_bends", []))
+        points = list(points)
         for boundary in (note.start, note.start + note.duration):
             if abs(boundary - time_sec) < 1e-7:
                 continue
@@ -5578,8 +5647,9 @@ class PianoRoll(QWidget):
         points = [p for p in points if abs(float(p[0]) - time_sec) >= 1e-7]
         points.append((time_sec, current_value, note.pitch))
         points.sort(key=lambda p: float(p[0]))
-        self.midi.pitch_bends = points
-        self.midi.pitch_bend_line_hidden = False
+        active_points = self._editable_pitch_bends()
+        active_points[:] = points
+        self._set_active_pitch_bend_line_hidden(False)
         self.midi._bump()
         self.audio.invalidate_midi_cache()
         index = next(i for i, p in enumerate(points) if abs(float(p[0]) - time_sec) < 1e-7 and float(p[2]) == float(note.pitch))

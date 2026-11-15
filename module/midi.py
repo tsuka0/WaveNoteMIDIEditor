@@ -40,6 +40,8 @@ class Track:
     audio_params: dict = field(default_factory=dict)
     program: int = 0
     is_drum: bool = False
+    pitch_bends: list = field(default_factory=list)
+    pitch_bend_line_hidden: bool = False
 
 def shiftjis_safe_text(text):
     """MIDIテキストイベント用にCP932(Shift-JIS)で表現できる文字列にする。
@@ -102,6 +104,8 @@ class MidiData:
                         copy.copy(p)
                         for p in track.pedals
                     ],
+                    pitch_bends=list(getattr(track, "pitch_bends", [])),
+                    pitch_bend_line_hidden=bool(getattr(track, "pitch_bend_line_hidden", False)),
                     channel=track.channel,
                     audio_file=track.audio_file,
                     audio_params=dict(track.audio_params),
@@ -147,6 +151,8 @@ class MidiData:
                     )
                     for pedal in track.pedals
                 ],
+                pitch_bends=list(getattr(track, "pitch_bends", [])),
+                pitch_bend_line_hidden=bool(getattr(track, "pitch_bend_line_hidden", False)),
                 channel=getattr(track, 'channel', 0),
                 audio_file=getattr(track, 'audio_file', ""),
                 audio_params=dict(getattr(track, 'audio_params', {})),
@@ -554,6 +560,61 @@ class MidiData:
 
     def set_filter_track(self, index):
         self.filter_track = index
+
+    def pitch_bends_for_track(self, track_index):
+        global_bends = sorted(
+            getattr(self, "pitch_bends", []),
+            key=lambda point: float(point[0])
+        )
+        if not (0 <= track_index < len(self.tracks)):
+            return global_bends
+
+        track_bends = sorted(
+            getattr(self.tracks[track_index], "pitch_bends", []),
+            key=lambda point: float(point[0])
+        )
+        if not global_bends:
+            return track_bends
+        if not track_bends:
+            return global_bends
+
+        def value_at(points, at_time):
+            if at_time <= float(points[0][0]):
+                return float(points[0][1])
+            for left, right in zip(points, points[1:]):
+                t0, v0 = float(left[0]), float(left[1])
+                t1, v1 = float(right[0]), float(right[1])
+                if t0 <= at_time <= t1:
+                    if t1 <= t0:
+                        return v1
+                    return v0 + (at_time - t0) / (t1 - t0) * (v1 - v0)
+            return float(points[-1][1])
+
+        times = sorted({
+            float(point[0])
+            for point in global_bends + track_bends
+        })
+        combined = []
+        for at_time in times:
+            matching_track = next(
+                (point for point in track_bends if abs(float(point[0]) - at_time) < 1e-7),
+                None
+            )
+            matching_global = next(
+                (point for point in global_bends if abs(float(point[0]) - at_time) < 1e-7),
+                None
+            )
+            anchor = (
+                matching_track[2] if matching_track is not None and len(matching_track) > 2
+                else matching_global[2] if matching_global is not None and len(matching_global) > 2
+                else 60.0
+            )
+            combined.append((
+                at_time,
+                value_at(global_bends, at_time) + value_at(track_bends, at_time),
+                anchor
+            ))
+        return combined
 
     def _time_to_beat_mapper(self):
         self._ensure_caches()
@@ -1413,7 +1474,8 @@ class MidiData:
             tracks_to_export = list(enumerate(self.tracks))
 
         for track_idx, track in tracks_to_export:
-            if not track.notes and not track.pedals and not getattr(self, "pitch_bends", []):
+            bends = self.pitch_bends_for_track(track_idx)
+            if not track.notes and not track.pedals and not bends:
                 continue
 
             mtrack = mido.MidiTrack()
@@ -1455,7 +1517,6 @@ class MidiData:
             for control, value in ((101, 0), (100, 0), (6, 12), (38, 0), (101, 127), (100, 127)):
                 events.append((0, -2, ("cc", control, value)))
 
-            bends = sorted(getattr(self, "pitch_bends", []), key=lambda p: float(p[0]))
             if bends:
                 sampled = []
                 for i, point in enumerate(bends):
@@ -2241,7 +2302,6 @@ class MidiData:
         ]
 
         new_tracks = []
-        imported_pitch_bends = []
         is_format_0 = midi.type == 0
 
         for mtrack in midi.tracks:
@@ -2297,13 +2357,6 @@ class MidiData:
                                 msg.channel
                             )
                         )
-
-                elif msg.type == "pitchwheel":
-                    imported_pitch_bends.append((
-                        ticks_to_seconds(abs_tick),
-                        max(-12.0, min(12.0, float(msg.pitch) / 8192.0 * 12.0)),
-                        60
-                    ))
 
                 elif (
                     msg.type == "control_change" and
@@ -2371,10 +2424,10 @@ class MidiData:
             new_tracks = [Track()]
 
         self.tracks = new_tracks
-        self.pitch_bends = sorted(
-            {(round(t, 6), round(value, 6), int(anchor)) for t, value, anchor in imported_pitch_bends},
-            key=lambda point: point[0]
-        )
+        # Ignore source pitch-bend events on MIDI import. Besides keeping the
+        # piano-roll bend overlay opt-in, this avoids processing dense bend
+        # automation from imported files during editing and playback.
+        self.pitch_bends = []
         self.pitch_bend_line_hidden = False
         self.filter_track = 0
         self.has_file = True
