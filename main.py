@@ -89,8 +89,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QAction, QKeySequence, QIcon, QPalette
 from PySide6.QtCore import QTimer, Qt, QEvent, QObject
 from module.audio import AudioData
-from module.spectrum import SpectrumData
-from module.midi import MidiData, Note, PedalEvent
+from module.spectrum import SpectrumData, TempoCandidateGraph
+from module.midi import MidiData, Note, PedalEvent, Track
 from module.piano_roll import PianoRoll
 from module import midiout
 from module.midiout import list_ports
@@ -98,7 +98,6 @@ from module.settings import load_value, save_value, delete_value, load_last_dir,
 from module.i18n import tr, get_language, set_language, LANGUAGES
 from module.discord_rpc import DiscordRPC
 from module.features import ENABLE_LYRICS, ENABLE_SVP
-from module.voice_library import VoiceLibrary
 
 DISCORD_CLIENT_ID = "1539710543751942214"
 
@@ -751,7 +750,6 @@ class MainWindow(QMainWindow):
         self.track_audio = {}
         self.spectrum = SpectrumData()
         self.midi = MidiData()
-
         self.audio_presets = load_audio_presets()
 
         self.audio.set_output_device(
@@ -854,6 +852,7 @@ class MainWindow(QMainWindow):
         self._analysis_token = 0
         self._pending_audio_duration = None
         self._pending_tempo_analysis = None
+        self._pending_tempo_error = None
         self._pending_tap_onsets = None
         self._tempo_analyzed = False
         self._project_path = None
@@ -878,7 +877,6 @@ class MainWindow(QMainWindow):
             self.open_file_by_path(initial_file, exit_on_failure=True)
 
         self.update_shortcuts()
-        VoiceLibrary.get_instance().prewarm_notes(self.midi.notes, self.audio.sr)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -1124,21 +1122,6 @@ class MainWindow(QMainWindow):
 
     def changeEvent(self, event):
         super().changeEvent(event)
-        if event.type() == QEvent.ActivationChange and self.isActiveWindow():
-            vl = VoiceLibrary.get_instance()
-            if vl.folder_path and os.path.isdir(vl.folder_path):
-                old_count = sum(len(p) for p in vl.samples.values())
-                vl.scan_library()
-                new_count = sum(len(p) for p in vl.samples.values())
-                if new_count != old_count:
-                    vl.prewarm_notes(self.midi.notes, self.audio.sr)
-                    self.statusBar().showMessage(
-                        tr(
-                            f"音声ライブラリを更新しました (発音: {len(vl.samples)}, サンプル: {new_count})",
-                            f"Voice library updated (Phonemes: {len(vl.samples)}, Samples: {new_count})"
-                        ),
-                        3000
-                    )
 
     def create_menu(self):
         file_menu = self.menuBar().addMenu(
@@ -1168,8 +1151,6 @@ class MainWindow(QMainWindow):
         open_audio_action = QAction(tr("オーディオを開く", "Open Audio"), self)
         open_audio_action.triggered.connect(self.open_audio)
 
-        select_voice_lib_action = QAction(tr("音声ライブラリフォルダを選択...", "Select Voice Library Folder..."), self)
-        select_voice_lib_action.triggered.connect(self.change_voice_library_dir)
 
         save_action = QAction(tr("MIDI上書き保存", "Overwrite-save MIDI"), self)
         save_action.triggered.connect(self.save_midi)
@@ -1185,7 +1166,6 @@ class MainWindow(QMainWindow):
         file_menu.addAction(save_project_action)
         file_menu.addAction(open_midi_action)
         file_menu.addAction(open_audio_action)
-        file_menu.addAction(select_voice_lib_action)
         file_menu.addAction(save_action)
         file_menu.addAction(save_as_action)
         file_menu.addAction(exit_action)
@@ -1558,13 +1538,6 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self.onion_skin_button)
 
         toolbar.addSeparator()
-        self.voice_lib_label = QLabel()
-        self.voice_lib_label.setStyleSheet("color: #64b5f6; font-size: 11px; margin-left: 4px;")
-        self.voice_lib_label.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.voice_lib_label.customContextMenuRequested.connect(self._show_voice_lib_menu)
-        toolbar.addWidget(self.voice_lib_label)
-        self.update_voice_lib_ui()
-
         # --- Audio DSP Toolbar (New Row) ---
         self.addToolBarBreak()
         audio_toolbar = self.addToolBar("Audio DSP")
@@ -2135,7 +2108,8 @@ class MainWindow(QMainWindow):
         audio,
         resolved_audio_file,
         window_title,
-        restore_params=None
+        restore_params=None,
+        allow_tempo_apply=True
     ):
         self._analysis_token += 1
         token = self._analysis_token
@@ -2143,22 +2117,27 @@ class MainWindow(QMainWindow):
         self._analysis_error = None
         self._pending_audio_duration = None
         self._pending_tempo_analysis = None
+        self._pending_tempo_error = None
         self._pending_tap_onsets = None
 
         if getattr(audio, "spectrum", None) is None:
             audio.spectrum = SpectrumData()
 
-        # 作曲テンポの基準はMIDIファイル(または最初の音声から計測したテンポ)。
-        # 最初の音声ロード時のみテンポを解析し、以降の音声では上書きしない。
-        analyze_tempo = (
+        # Always analyze with madmom so tempo-edit dialogs can show the graph.
+        # Applying the automatic result remains optional and yields to MIDI tempo.
+        analyze_tempo = True
+        apply_analyzed_tempo = (
+            allow_tempo_apply and
             self._auto_bpm_analysis_enabled() and
             not self.midi.has_file and
-            not self._tempo_analyzed
+            not self.midi.notes
         )
 
         is_active = self.audio is audio
 
         audio.clear()
+        if is_active:
+            self.editor.tempo_analysis = None
 
         if is_active:
             # 読み込み対象が現在表示中の音声の場合のみエディタ表示を
@@ -2176,13 +2155,18 @@ class MainWindow(QMainWindow):
 
                 self._pending_audio_duration = duration
 
-                audio.spectrum.analyze(
-                    audio.y_mono,
-                    audio.sr,
-                    self.editor.min_pitch,
-                    self.editor.max_pitch,
-                    audio.a4_freq
-                )
+                try:
+                    audio.spectrum.analyze(
+                        audio.y_mono,
+                        audio.sr,
+                        self.editor.min_pitch,
+                        self.editor.max_pitch,
+                        audio.a4_freq
+                    )
+                except Exception:
+                    # A CQT/spectrum failure must not prevent madmom from
+                    # producing the tempo result and candidate graph.
+                    pass
 
                 if analyze_tempo:
                     try:
@@ -2197,10 +2181,17 @@ class MainWindow(QMainWindow):
                         if tempo_result is not None:
                             self._pending_tempo_analysis = (
                                 tempo_result,
-                                audio
+                                audio,
+                                apply_analyzed_tempo
                             )
+                            self._pending_tempo_error = None
                         else:
                             self._pending_tempo_analysis = None
+                            self._pending_tempo_error = getattr(
+                                audio.spectrum,
+                                "last_tempo_analysis_error",
+                                None
+                            ) or "madmom returned no tempo result."
 
                 if token != self._analysis_token:
                     return
@@ -2618,7 +2609,6 @@ class MainWindow(QMainWindow):
             "audio_eq_mid": getattr(self._global_audio, "eq_mid", 1.0),
             "audio_eq_high": getattr(self._global_audio, "eq_high", 1.0),
             "audio_muted": getattr(self._global_audio, "audio_muted", False),
-            "voice_library_dir": VoiceLibrary.get_instance().folder_path,
         }
 
         for index, track in enumerate(self.midi.tracks):
@@ -2868,7 +2858,6 @@ class MainWindow(QMainWindow):
                 raise ValueError(tr("プロジェクトファイルの形式が無効です（ルートデータがJSONオブジェクトではありません）。",
                                     "Invalid project file format: root content is not a JSON object."))
 
-            # テンポ・拍子の安全な復元
             new_midi = MidiData()
             new_midi.play_all_tracks = self.play_all_tracks_button.isChecked()
             new_midi.tracks.clear()
@@ -2980,12 +2969,6 @@ class MainWindow(QMainWindow):
             self._global_audio.eq_mid = project_audio_eq_mid
             self._global_audio.eq_high = project_audio_eq_high
             self._global_audio.audio_muted = project_audio_muted
-
-            # 音声ライブラリ設定の復元
-            voice_lib_dir = project.get("voice_library_dir")
-            if voice_lib_dir and os.path.isdir(voice_lib_dir):
-                VoiceLibrary.get_instance().set_folder(voice_lib_dir)
-            VoiceLibrary.get_instance().prewarm_notes(self.midi.notes, self.audio.sr)
 
             # エディタにMIDIを設定
             self.editor.set_midi(self.midi)
@@ -3114,8 +3097,13 @@ class MainWindow(QMainWindow):
 
 
     def undo(self):
+        before_audio_state = self._current_audio_history_state()
         if not self.midi.undo():
             return
+
+        restored_audio_state = getattr(self.midi, "extra_state", {}).get("audio_history_state")
+        if restored_audio_state != before_audio_state:
+            self._restore_audio_history_state(restored_audio_state)
             
         if "audio_offset" in getattr(self.midi, "extra_state", {}):
             self.audio.offset = self.midi.extra_state["audio_offset"]
@@ -3123,8 +3111,13 @@ class MainWindow(QMainWindow):
         self.after_edit()
 
     def redo(self):
+        before_audio_state = self._current_audio_history_state()
         if not self.midi.redo():
             return
+
+        restored_audio_state = getattr(self.midi, "extra_state", {}).get("audio_history_state")
+        if restored_audio_state != before_audio_state:
+            self._restore_audio_history_state(restored_audio_state)
             
         if "audio_offset" in getattr(self.midi, "extra_state", {}):
             self.audio.offset = self.midi.extra_state["audio_offset"]
@@ -3142,7 +3135,71 @@ class MainWindow(QMainWindow):
 
         self.editor.update()
 
-        VoiceLibrary.get_instance().prewarm_notes(self.midi.notes, self.audio.sr)
+    def _current_audio_history_state(self):
+        tracks = []
+        for index, track in enumerate(self.midi.tracks):
+            ta = self.track_audio.get(index)
+            tracks.append({
+                "file": (ta.file_path if ta and ta.file_path else track.audio_file) or "",
+                "params": self._collect_audio_params(ta) if ta else dict(track.audio_params or {}),
+            })
+        return {
+            "global": {
+                "file": self._global_audio.file_path or "",
+                "params": self._collect_audio_params(self._global_audio),
+            },
+            "tracks": tracks,
+        }
+
+    def _store_audio_history_state(self):
+        if not hasattr(self.midi, "extra_state"):
+            self.midi.extra_state = {}
+        self.midi.extra_state["audio_history_state"] = self._current_audio_history_state()
+
+    def _restore_audio_history_state(self, state):
+        state = state or {"global": {"file": "", "params": {}}, "tracks": []}
+        self.audio.stop()
+        for ta in self.track_audio.values():
+            ta.clear()
+            ta.close()
+        self.track_audio.clear()
+        self.audio = self._global_audio
+        self.editor.set_audio(self._global_audio)
+
+        global_state = state.get("global", {})
+        global_file = global_state.get("file", "")
+        if global_file and os.path.isfile(global_file):
+            self._load_audio_into(
+                self._global_audio, global_file,
+                tr("元に戻す", "Undo"),
+                restore_params=global_state.get("params", {}),
+                allow_tempo_apply=False,
+            )
+        else:
+            self._global_audio.clear()
+            self.editor.clear_audio()
+
+        track_states = state.get("tracks", [])
+        for index, track in enumerate(self.midi.tracks):
+            saved = track_states[index] if index < len(track_states) else {}
+            track.audio_file = saved.get("file", "") or ""
+            track.audio_params = dict(saved.get("params", {}) or {})
+            path = self._resolve_audio_path(track.audio_file) if track.audio_file else None
+            if path:
+                ta = self._ensure_track_audio(index)
+                self._load_audio_into(
+                    ta, path, tr("元に戻す", "Undo"),
+                    restore_params=track.audio_params,
+                    allow_tempo_apply=False,
+                )
+
+        self.audio = self._current_audio()
+        self.editor.set_audio(self.audio)
+        self._apply_audio_context()
+        self._refresh_timeline_reference()
+        self._sync_audio_ui()
+        self.update_editor()
+
 
     def change_note_length(self, index):
         beats = (
@@ -3158,8 +3215,6 @@ class MainWindow(QMainWindow):
         action = self.actions.get("action_lyric_mode")
         if action is not None and action.isChecked() != enabled:
             action.setChecked(enabled)
-        if hasattr(self, "audio") and hasattr(self.audio, "set_lyric_mode"):
-            self.audio.set_lyric_mode(enabled)
 
     def toggle_lyric_mode(self):
         if not ENABLE_LYRICS:
@@ -3244,6 +3299,11 @@ class MainWindow(QMainWindow):
         tempo_spin.setValue(current_tempo)
         hlayout.addWidget(tempo_spin)
         layout.addLayout(hlayout)
+
+        analysis = getattr(self.editor, "tempo_analysis", None)
+        if analysis is not None:
+            layout.addWidget(QLabel(tr("解析候補 (クリックでテンポ欄に反映)", "Analysis candidates (click to set BPM)")))
+            layout.addWidget(TempoCandidateGraph(analysis, tempo_spin.setValue, dialog))
         
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         layout.addWidget(buttons)
@@ -3267,6 +3327,13 @@ class MainWindow(QMainWindow):
         
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
+
+        dialog.adjustSize()
+        current_size = dialog.size()
+        dialog.resize(
+            max(current_size.width(), round(current_size.height() * 16 / 9)),
+            current_size.height(),
+        )
         
         if dialog.exec() == QDialog.Accepted:
             self.after_edit()
@@ -3310,10 +3377,12 @@ class MainWindow(QMainWindow):
 
     def clear_audio(self):
         self._analysis_token += 1
+        self.editor.tempo_analysis = None
         self._analysis_ready = False
         self._analysis_error = None
         self._pending_audio_duration = None
         self._pending_tempo_analysis = None
+        self._pending_tempo_error = None
         self._pending_tap_onsets = None
         self._tempo_analyzed = False
 
@@ -3347,142 +3416,6 @@ class MainWindow(QMainWindow):
         self._sync_audio_ui()
 
         self.update_title()
-
-    def update_voice_lib_ui(self):
-        """音声ライブラリの状態をツールバーのラベルに反映する。"""
-        if not hasattr(self, "voice_lib_label"):
-            return
-        vl = VoiceLibrary.get_instance()
-        if vl.folder_path and os.path.isdir(vl.folder_path):
-            folder_name = os.path.basename(os.path.normpath(vl.folder_path))
-            count = sum(len(p) for p in vl.samples.values())
-            phonemes = len(vl.samples)
-            if count > 0:
-                self.voice_lib_label.setText(f"📁 {folder_name} ({count})")
-                self.voice_lib_label.setStyleSheet("color: #90caf9; font-weight: bold; font-size: 11px; margin-left: 6px;")
-                self.voice_lib_label.setToolTip(
-                    f"{vl.folder_path}\n"
-                    f"発音数: {phonemes}, サンプル数: {count}\n"
-                    "※右クリックで再読み込み・エクスプローラー表示・設定解除ができます"
-                )
-            else:
-                self.voice_lib_label.setText(f"📁 {folder_name} (0)")
-                self.voice_lib_label.setStyleSheet("color: #ef9a9a; font-size: 11px; margin-left: 6px;")
-                self.voice_lib_label.setToolTip(
-                    f"{vl.folder_path}\n"
-                    "※△_○○.wav (例: あ_C4.wav) 形式のファイルが見つかりません"
-                )
-        else:
-            self.voice_lib_label.setText(tr("(未設定)", "(Not set)"))
-            self.voice_lib_label.setStyleSheet("color: #888888; font-size: 11px; margin-left: 6px;")
-            self.voice_lib_label.setToolTip(tr("原音ライブラリフォルダが未設定です。「音声ライブラリフォルダを選択...」からフォルダを選択してください。", "Voice library not set. Click 'Select Voice Library Folder...' to choose a folder."))
-
-    def change_voice_library_dir(self):
-        """音声ライブラリフォルダを選択・変更して読み込む。"""
-        vl = VoiceLibrary.get_instance()
-        current_dir = vl.folder_path if (vl.folder_path and os.path.isdir(vl.folder_path)) else load_last_dir()
-        folder = QFileDialog.getExistingDirectory(
-            self,
-            tr("音声ライブラリフォルダを選択", "Select Voice Library Folder"),
-            current_dir
-        )
-        if folder:
-            vl.set_folder(folder)
-            count = sum(len(p) for p in vl.samples.values())
-            phonemes = len(vl.samples)
-            vl.prewarm_notes(self.midi.notes, self.audio.sr)
-            self.update_voice_lib_ui()
-            save_last_dir(folder)
-            if count > 0:
-                self.statusBar().showMessage(
-                    tr(
-                        f"音声ライブラリを読み込みました: {os.path.basename(folder)} (発音: {phonemes}, サンプル: {count})",
-                        f"Loaded voice library: {os.path.basename(folder)} (Phonemes: {phonemes}, Samples: {count})"
-                    ),
-                    5000
-                )
-            else:
-                QMessageBox.warning(
-                    self,
-                    tr("音声ライブラリ", "Voice Library"),
-                    tr(
-                        f"選択されたフォルダに有効な音声ファイルが見つかりませんでした:\n{folder}\n\n※ファイル名は「あ_C4.wav」のように「△_○○.wav」形式である必要があります。",
-                        f"No valid voice files found in selected folder:\n{folder}\n\n* Filename must follow 'phoneme_pitch.wav' format (e.g. あ_C4.wav)."
-                    )
-                )
-
-    def reveal_voice_library_in_explorer(self):
-        """音声ライブラリフォルダをエクスプローラーで表示する。"""
-        vl = VoiceLibrary.get_instance()
-        if vl.folder_path and os.path.isdir(vl.folder_path):
-            vl.open_folder()
-        else:
-            QMessageBox.information(
-                self,
-                tr("音声ライブラリ", "Voice Library"),
-                tr("音声ライブラリフォルダが設定されていません。", "Voice library folder is not set.")
-            )
-
-    def rescan_voice_library(self):
-        """音声ライブラリフォルダを再スキャンする。"""
-        vl = VoiceLibrary.get_instance()
-        if vl.folder_path and os.path.isdir(vl.folder_path):
-            vl.clear_cache()
-            vl.scan_library()
-            count = sum(len(p) for p in vl.samples.values())
-            phonemes = len(vl.samples)
-            vl.prewarm_notes(self.midi.notes, self.audio.sr)
-            self.update_voice_lib_ui()
-            self.statusBar().showMessage(
-                tr(
-                    f"音声ライブラリを再読み込みしました: {os.path.basename(vl.folder_path)} (発音: {phonemes}, サンプル: {count})",
-                    f"Reloaded voice library: {os.path.basename(vl.folder_path)} (Phonemes: {phonemes}, Samples: {count})"
-                ),
-                4000
-            )
-        else:
-            self.change_voice_library_dir()
-
-    def _show_voice_lib_menu(self, pos):
-        """音声ライブラリラベルの右クリックメニュー。"""
-        menu = QMenu(self)
-        change_action = menu.addAction(tr("フォルダを選択・変更...", "Select/Change Folder..."))
-        change_action.triggered.connect(self.change_voice_library_dir)
-
-        if VoiceLibrary.get_instance().folder_path:
-            rescan_action = menu.addAction(tr("ライブラリを再読み込み", "Reload Library"))
-            rescan_action.triggered.connect(self.rescan_voice_library)
-
-        if sys.platform.startswith("win"):
-            reveal_text = tr("エクスプローラーでフォルダを表示", "Show in Explorer")
-        elif sys.platform == "darwin":
-            reveal_text = tr("Finderでフォルダを表示", "Show in Finder")
-        else:
-            reveal_text = tr("ファイルマネージャーでフォルダを表示", "Show in File Manager")
-        reveal_action = menu.addAction(reveal_text)
-        reveal_action.triggered.connect(self.reveal_voice_library_in_explorer)
-
-        if VoiceLibrary.get_instance().folder_path:
-            menu.addSeparator()
-            clear_action = menu.addAction(tr("フォルダを解除（未設定に戻す）", "Clear Folder (Reset to Not Set)"))
-            clear_action.triggered.connect(self.clear_voice_library)
-
-        widget = self.sender()
-        if widget is not None:
-            menu.exec(widget.mapToGlobal(pos))
-        else:
-            menu.exec(self.mapToGlobal(pos))
-
-    def clear_voice_library(self):
-        """音声ライブラリフォルダの設定を解除し、未設定の状態に戻す。"""
-        vl = VoiceLibrary.get_instance()
-        vl.clear_folder()
-        self.update_voice_lib_ui()
-        self.statusBar().showMessage(
-            tr("音声ライブラリの設定を解除しました。", "Voice library settings cleared."),
-            4000
-        )
-
 
     def open_audio(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -3537,6 +3470,8 @@ class MainWindow(QMainWindow):
             else:
                 audio = self._global_audio
 
+            self._store_audio_history_state()
+            self.midi.push_undo()
             audio.a4_freq = a4_freq
 
             self._load_audio_into(
@@ -3553,6 +3488,7 @@ class MainWindow(QMainWindow):
                 )
 
             self._apply_audio_context()
+            self._store_audio_history_state()
             self.update_editor()
             self.editor.set_play_position(0.0)
             self.editor.scroll_x = 0.0
@@ -3661,8 +3597,7 @@ class MainWindow(QMainWindow):
             self._project_path = None
             self._sync_audio_ui()
             self.update_title()
-            VoiceLibrary.get_instance().prewarm_notes(self.midi.notes, self.audio.sr)
-
+    
         except Exception as e:
             QMessageBox.critical(
                 self,
@@ -3813,29 +3748,36 @@ class MainWindow(QMainWindow):
             else:
                 if self._pending_tempo_analysis is not None:
                     (
-                        (bpm, beat_origin),
-                        tempo_audio
+                        _analysis_result,
+                        tempo_audio,
+                        apply_analyzed_tempo,
                     ) = self._pending_tempo_analysis
+                    bpm, beat_origin = _analysis_result
                     self._pending_tempo_analysis = None
 
-                    self.midi.set_base_tempo(bpm)
+                    self.editor.tempo_analysis = _analysis_result
 
-                    self._tempo_analyzed = True
+                    if apply_analyzed_tempo:
+                        self.midi.set_base_tempo(bpm)
+                        self._tempo_analyzed = True
 
-                    # グリッドの拍1が必ず開始位置(0秒)に来るようにする。
-                    # 開始位置より前に拍が読めるグリッドを作らない。
-                    # beat_to_time(1) = (1 - beat_phase) * (60/bpm) = 0
-                    self.midi.set_beat_phase(
-                        1.0
+                        # Grid beat 1 begins at zero; place audio so the
+                        # detected first beat aligns to the second measure.
+                        self.midi.set_beat_phase(1.0)
+                        self.editor.bpm = bpm
+                        self._place_audio_at_second_measure(
+                            tempo_audio,
+                            beat_origin
+                        )
+                elif self._pending_tempo_error:
+                    self.statusBar().showMessage(
+                        tr(
+                            f"madmomのテンポ解析に失敗しました: {self._pending_tempo_error}",
+                            f"madmom tempo analysis failed: {self._pending_tempo_error}"
+                        ),
+                        12000
                     )
-                    self.editor.bpm = bpm
-
-                    # BPM自動解析が成功した音声は、解析で検出した曲の
-                    # 開始位置が2小節目の頭に来るように配置する。
-                    self._place_audio_at_second_measure(
-                        tempo_audio,
-                        beat_origin
-                    )
+                    self._pending_tempo_error = None
 
 
 
@@ -3954,34 +3896,10 @@ if __name__ == "__main__":
         app.styleHints().setColorScheme(Qt.ColorScheme.Unknown)
 
     initial_file = None
-    voice_lib_dir = os.environ.get("WAVENOTE_VOICE_LIB", None)
-
-    args = sys.argv[1:]
-    idx = 0
-    while idx < len(args):
-        arg = args[idx]
-        if arg in ("--voice-dir", "--voice-lib") and idx + 1 < len(args):
-            voice_lib_dir = args[idx + 1]
-            idx += 2
-        elif arg.startswith("--voice-dir="):
-            voice_lib_dir = arg.split("=", 1)[1]
-            idx += 1
-        elif arg.startswith("--voice-lib="):
-            voice_lib_dir = arg.split("=", 1)[1]
-            idx += 1
-        elif os.path.isdir(arg):
-            voice_lib_dir = arg
-            idx += 1
-        elif os.path.isfile(arg):
+    for arg in sys.argv[1:]:
+        if os.path.isfile(arg):
             initial_file = arg
-            idx += 1
-        else:
-            if not initial_file:
-                initial_file = arg
-            idx += 1
-
-    if voice_lib_dir and os.path.isdir(voice_lib_dir):
-        VoiceLibrary.get_instance().set_folder(voice_lib_dir)
+            break
 
     window = MainWindow(initial_file=initial_file)
     window.show()

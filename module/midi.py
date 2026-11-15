@@ -111,11 +111,11 @@ class MidiData:
                 for t, text in getattr(self, "markers", [])
             ],
             "beat_phase": self.beat_phase,
-            "extra_state": getattr(self, "extra_state", {}).copy()
+            "extra_state": copy.deepcopy(getattr(self, "extra_state", {}))
         }
 
     def restore(self, snap):
-        self.extra_state = snap.get("extra_state", {}).copy()
+        self.extra_state = copy.deepcopy(snap.get("extra_state", {}))
         self.tracks = [
             Track(
                 name=track.name,

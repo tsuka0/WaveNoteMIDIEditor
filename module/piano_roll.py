@@ -5,7 +5,7 @@ import numpy as np
 from PySide6.QtWidgets import QWidget, QDialog, QSpinBox, QDoubleSpinBox, QCheckBox, QLabel, QVBoxLayout, QHBoxLayout, QDialogButtonBox, QMenu, QInputDialog, QLineEdit
 from PySide6.QtCore import Qt, QPointF, QRectF, Signal, QTimer
 from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont, QFontMetrics, QKeySequence, QImage
-from .spectrum import SpectrumData
+from .spectrum import SpectrumData, TempoCandidateGraph
 from .taptempo import TapTempoEngine, MIN_TAPS_FOR_APPLY
 from .i18n import tr
 from .features import ENABLE_LYRICS
@@ -257,8 +257,6 @@ class PianoRoll(QWidget):
         self.audio = audio
 
         self.audio.set_midi(self.midi)
-        if hasattr(self.audio, "set_lyric_mode"):
-            self.audio.set_lyric_mode(self.lyric_mode)
 
         if getattr(audio, "spectrum", None) is None:
             audio.spectrum = SpectrumData()
@@ -918,8 +916,6 @@ class PianoRoll(QWidget):
             return
 
         self.lyric_mode = enabled
-        if hasattr(self, "audio") and hasattr(self.audio, "set_lyric_mode"):
-            self.audio.set_lyric_mode(enabled)
         self.unsetCursor()
         self.update()
         try:
@@ -1004,17 +1000,12 @@ class PianoRoll(QWidget):
 
                 target.lyric = text
                 self.midi._bump()
-                self.preview_pitch(target.pitch, phoneme=text)
+                self.preview_pitch(target.pitch)
 
             idx += 1
 
         if undo_pushed:
             self.audio.invalidate_midi_cache()
-            try:
-                from .voice_library import VoiceLibrary
-                VoiceLibrary.get_instance().prewarm_notes(self.midi.notes, self.audio.sr)
-            except Exception:
-                pass
 
         self.update()
 
@@ -2244,6 +2235,13 @@ class PianoRoll(QWidget):
         spin.setValue(bpm)
         layout.addWidget(spin)
 
+        analysis = getattr(self, "tempo_analysis", None)
+        if analysis is not None:
+            hint = QLabel(tr("解析候補 (クリックでテンポ欄に反映)", "Analysis candidates (click to set BPM)"))
+            layout.addWidget(hint)
+            graph = TempoCandidateGraph(analysis, spin.setValue, dlg)
+            layout.addWidget(graph)
+
         del_check = QCheckBox(
             tr("このテンポを削除", "Delete This Tempo")
         )
@@ -2293,6 +2291,13 @@ class PianoRoll(QWidget):
 
         buttons.accepted.connect(dlg.accept)
         buttons.rejected.connect(dlg.reject)
+
+        dlg.adjustSize()
+        current_size = dlg.size()
+        dlg.resize(
+            max(current_size.width(), round(current_size.height() * 16 / 9)),
+            current_size.height(),
+        )
 
         if dlg.exec() == QDialog.Accepted:
             self._after_marker_edit()
@@ -2760,6 +2765,7 @@ class PianoRoll(QWidget):
                 if self.audio.playing:
                     self.audio.invalidate_midi_cache()
 
+        had_note_drag = self.drag_note is not None
         self.drag_note = None
         self.drag_mode = None
         self.drag_start = None
@@ -2769,6 +2775,9 @@ class PianoRoll(QWidget):
         self.press_moved = False
         self._previewed_pitch = None
         self._nudge_undo_pushed = False
+
+        if had_note_drag:
+            self.preview_pitch(None)
 
         self._refresh_cursor_under_mouse()
 
@@ -3359,14 +3368,13 @@ class PianoRoll(QWidget):
 
     def preview_pitch(
         self,
-        pitch,
-        phoneme=None
+        pitch
     ):
         self._previewed_pitch = pitch
 
         self.audio.preview_note(
             pitch,
-            phoneme=phoneme
+            track_index=self.midi.active_track()
         )
 
     def _velocity_bars(self):

@@ -20,7 +20,6 @@
   - 音声オフセットは自動変更しません
 - MIDIの作成・読み込み・保存 (`.mid` / `.midi`)
 - Synthesizer V プロジェクト (`.svp`) の読み込み（トラック・ノート・テンポ・拍子）
-- UTAU音声ライブラリの読み込み・プレビュー合成再生、歌詞編集
 - ノートの追加、移動、リサイズ、コピー＆ペースト、削除
 - ベロシティ編集、サステインペダル (CC64) の編集
 - テンポ・拍子の変更および再生位置への追加、タップテンポ機能
@@ -133,7 +132,6 @@ MIDIファイルを読み込んだ場合は、そのMIDIに含まれるテンポ
 | `module/spectrum.py` | CQTスペクトラムとテンポ・拍位置解析 |
 | `module/midi.py` | MIDIデータ、テンポ・拍子モデル、入出力、編集履歴 |
 | `module/midiout.py` | MIDI出力デバイスの列挙・送信 |
-| `module/voice_library.py` | UTAU音声ライブラリの読み込み・プレビュー合成 |
 | `module/settings.py` | アプリケーション設定の保存・読み込み |
 | `module/discord_rpc.py` | Discord Rich Presence 通信機能 |
 | `module/i18n.py` | 多言語対応（日本語 / 英語） |
@@ -146,6 +144,7 @@ MIDIファイルを読み込んだ場合は、そのMIDIに含まれるテンポ
 ## 依存パッケージ
 
 主要な依存関係は `PySide6`、`librosa`、`madmom`、`numpy`、`sounddevice`、`mido`、`python-rtmidi` です。完全な一覧は [requirements.txt](requirements.txt) を参照してください。
+
 
 ## プロジェクトのビルド
 Windows向けexe化:
