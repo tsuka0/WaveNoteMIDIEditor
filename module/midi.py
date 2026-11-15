@@ -38,6 +38,8 @@ class Track:
     channel: int = 0
     audio_file: str = ""
     audio_params: dict = field(default_factory=dict)
+    program: int = 0
+    is_drum: bool = False
 
 def shiftjis_safe_text(text):
     """MIDIテキストイベント用にCP932(Shift-JIS)で表現できる文字列にする。
@@ -57,6 +59,8 @@ class MidiData:
         self.tempos = [(0.0, 120.0)]
         self.time_signatures = [(0.0, 4, 4)]
         self.markers = []
+        self.pitch_bends = []
+        self.pitch_bend_line_hidden = False
         self.filter_track = None
         self.play_all_tracks = False
         self.beat_phase = 0.0
@@ -100,7 +104,9 @@ class MidiData:
                     ],
                     channel=track.channel,
                     audio_file=track.audio_file,
-                    audio_params=dict(track.audio_params)
+                    audio_params=dict(track.audio_params),
+                    program=getattr(track, "program", 0),
+                    is_drum=getattr(track, "is_drum", False)
                 )
                 for track in self.tracks
             ],
@@ -111,11 +117,15 @@ class MidiData:
                 for t, text in getattr(self, "markers", [])
             ],
             "beat_phase": self.beat_phase,
+            "pitch_bends": list(getattr(self, "pitch_bends", [])),
+            "pitch_bend_line_hidden": bool(getattr(self, "pitch_bend_line_hidden", False)),
             "extra_state": copy.deepcopy(getattr(self, "extra_state", {}))
         }
 
     def restore(self, snap):
         self.extra_state = copy.deepcopy(snap.get("extra_state", {}))
+        self.pitch_bends = [tuple(point) for point in snap.get("pitch_bends", [])]
+        self.pitch_bend_line_hidden = bool(snap.get("pitch_bend_line_hidden", False))
         self.tracks = [
             Track(
                 name=track.name,
@@ -139,7 +149,9 @@ class MidiData:
                 ],
                 channel=getattr(track, 'channel', 0),
                 audio_file=getattr(track, 'audio_file', ""),
-                audio_params=dict(getattr(track, 'audio_params', {}))
+                audio_params=dict(getattr(track, 'audio_params', {})),
+                program=getattr(track, 'program', 0),
+                is_drum=getattr(track, 'is_drum', False)
             )
             for track in snap["tracks"]
         ]
@@ -505,6 +517,11 @@ class MidiData:
         used = set()
 
         for i, track in enumerate(self.tracks):
+            if getattr(track, "is_drum", False):
+                track.channel = 9
+                for note in track.notes:
+                    note.channel = 9
+                continue
             ch = track.channel
 
             if not isinstance(ch, int) or not (0 <= ch < 16) or ch == 9 or ch in used:
@@ -1396,7 +1413,7 @@ class MidiData:
             tracks_to_export = list(enumerate(self.tracks))
 
         for track_idx, track in tracks_to_export:
-            if not track.notes and not track.pedals:
+            if not track.notes and not track.pedals and not getattr(self, "pitch_bends", []):
                 continue
 
             mtrack = mido.MidiTrack()
@@ -1413,7 +1430,9 @@ class MidiData:
 
             export_channel = getattr(track, "channel", 0)
 
-            if (
+            if getattr(track, "is_drum", False):
+                export_channel = 9
+            elif (
                 not isinstance(export_channel, int) or
                 not (0 <= export_channel <= 15) or
                 export_channel in used_channels
@@ -1428,7 +1447,30 @@ class MidiData:
 
             used_channels.add(export_channel)
 
+            mtrack.append(mido.Message("program_change", program=max(0, min(127, int(getattr(track, "program", 0)))), channel=export_channel, time=0))
+
             events = []
+
+            # MIDI 1.0 RPN 0,0: pitch bend sensitivity = 12 semitones.
+            for control, value in ((101, 0), (100, 0), (6, 12), (38, 0), (101, 127), (100, 127)):
+                events.append((0, -2, ("cc", control, value)))
+
+            bends = sorted(getattr(self, "pitch_bends", []), key=lambda p: float(p[0]))
+            if bends:
+                sampled = []
+                for i, point in enumerate(bends):
+                    t, semitones = float(point[0]), float(point[1])
+                    sampled.append((t, semitones))
+                    if i + 1 < len(bends):
+                        nt, nv = float(bends[i + 1][0]), float(bends[i + 1][1])
+                        steps = max(1, int(math.ceil(max(0.0, nt - t) / 0.02)))
+                        for step in range(1, steps):
+                            f = step / steps
+                            sampled.append((t + (nt - t) * f, semitones + (nv - semitones) * f))
+                for bend_time, semitones in sampled:
+                    tick = int(round(self.seconds_to_tick(bend_time, ticks_per_beat)))
+                    raw = max(-8192, min(8191, int(round(semitones / 12.0 * 8192))))
+                    events.append((tick, -1, ("bend", raw)))
 
             for note in track.notes:
                 start_tick = int(
@@ -1496,7 +1538,12 @@ class MidiData:
 
                 current_tick = tick
 
-                if event_type == 1:
+                if isinstance(payload, tuple) and payload[0] == "cc":
+                    _, control, value = payload
+                    mtrack.append(mido.Message("control_change", control=control, value=value, channel=export_channel, time=delta))
+                elif isinstance(payload, tuple) and payload[0] == "bend":
+                    mtrack.append(mido.Message("pitchwheel", pitch=payload[1], channel=export_channel, time=delta))
+                elif event_type == 1:
                     mtrack.append(
                         mido.Message(
                             "note_on",
@@ -2194,6 +2241,7 @@ class MidiData:
         ]
 
         new_tracks = []
+        imported_pitch_bends = []
         is_format_0 = midi.type == 0
 
         for mtrack in midi.tracks:
@@ -2250,6 +2298,13 @@ class MidiData:
                             )
                         )
 
+                elif msg.type == "pitchwheel":
+                    imported_pitch_bends.append((
+                        ticks_to_seconds(abs_tick),
+                        max(-12.0, min(12.0, float(msg.pitch) / 8192.0 * 12.0)),
+                        60
+                    ))
+
                 elif (
                     msg.type == "control_change" and
                     msg.control == 64
@@ -2279,7 +2334,8 @@ class MidiData:
                             name=f"{base_name} - Ch {channel + 1}",
                             notes=channel_notes,
                             pedals=channel_pedals,
-                            channel=channel
+                            channel=channel,
+                            is_drum=(channel == 9)
                         )
                     )
             elif notes or pedals:
@@ -2306,7 +2362,8 @@ class MidiData:
                         name=name,
                         notes=notes,
                         pedals=pedals,
-                        channel=track_channel
+                        channel=track_channel,
+                        is_drum=(track_channel == 9)
                     )
                 )
 
@@ -2314,6 +2371,11 @@ class MidiData:
             new_tracks = [Track()]
 
         self.tracks = new_tracks
+        self.pitch_bends = sorted(
+            {(round(t, 6), round(value, 6), int(anchor)) for t, value, anchor in imported_pitch_bends},
+            key=lambda point: point[0]
+        )
+        self.pitch_bend_line_hidden = False
         self.filter_track = 0
         self.has_file = True
 

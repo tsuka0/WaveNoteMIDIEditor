@@ -112,6 +112,25 @@ class MidiOutDevice:
         v = max(0, min(127, int(value)))
         self._send(0xB0 | ch, c, v)
 
+    def program_change(self, program, channel=0):
+        ch = int(channel) & 0x0F
+        value = max(0, min(127, int(program)))
+        if self._rtmidi is not None and self._rtmidi.is_port_open():
+            try:
+                self._rtmidi.send_message([0xC0 | ch, value])
+            except Exception:
+                pass
+
+    def pitchwheel(self, pitch, channel=0):
+        """Send a MIDI 1.0 pitch wheel value in the -8192..8191 range."""
+        ch = int(channel) & 0x0F
+        value = max(-8192, min(8191, int(pitch))) + 8192
+        if self._rtmidi is not None and self._rtmidi.is_port_open():
+            try:
+                self._rtmidi.send_message([0xE0 | ch, value & 0x7F, (value >> 7) & 0x7F])
+            except Exception:
+                pass
+
     def all_notes_off(self):
         for pitch, channel in list(self._active):
             self._send(0x80 | channel, pitch, 0)

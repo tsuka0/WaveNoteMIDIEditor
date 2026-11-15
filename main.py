@@ -2328,21 +2328,65 @@ class MainWindow(QMainWindow):
 
     def rename_track(self):
         index = self.track_combo.currentData()
+        track = self.midi.tracks[index] if index is not None else None
+        dialog = QDialog(self)
+        dialog.setWindowTitle(tr("Track Settings" if track else "Audio File"))
+        form = QFormLayout(dialog)
+
+        if track is not None:
+            name_edit = QLineEdit(track.name, dialog)
+            program_spin = QSpinBox(dialog)
+            program_spin.setRange(0, 127)
+            program_spin.setValue(int(getattr(track, "program", 0)))
+            drum_check = QCheckBox(tr("Drum Channel (CH10)"), dialog)
+            drum_check.setChecked(bool(getattr(track, "is_drum", False)))
+            form.addRow(tr("Name"), name_edit)
+            form.addRow(tr("Program Change (0-127)"), program_spin)
+            form.addRow("", drum_check)
+
+        clear_button = QPushButton(tr("\u97f3\u58f0\u30d5\u30a1\u30a4\u30eb\u3092\u6d88\u53bb", "Clear Audio File"), dialog)
         if index is None:
+            has_audio = bool(self._global_audio.file_path or any(
+                t.audio_file or (self.track_audio.get(i) and self.track_audio[i].file_path)
+                for i, t in enumerate(self.midi.tracks)
+            ))
+        else:
+            ta = self.track_audio.get(index)
+            has_audio = bool(track.audio_file or (ta and ta.file_path))
+        clear_button.setEnabled(has_audio)
+        form.addRow(clear_button)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        clear_button.clicked.connect(lambda: (self.clear_audio(index), dialog.accept()))
+        if dialog.exec() != QDialog.Accepted or track is None:
             return
 
-        track = self.midi.tracks[index]
-        new_name, ok = QInputDialog.getText(
-            self,
-            tr("\u30c8\u30e9\u30c3\u30af\u540d\u306e\u5909\u66f4", "Rename Track"),
-            tr("\u65b0\u3057\u3044\u30c8\u30e9\u30c3\u30af\u540d:", "New track name:"),
-            text=track.name
-        )
+        old_program = int(getattr(track, "program", 0))
+        name = name_edit.text().strip() or track.name
+        program = program_spin.value()
+        is_drum = drum_check.isChecked()
+        self.midi.push_undo()
+        track.name = name
+        track.program = program
+        track.is_drum = is_drum
+        if is_drum:
+            track.channel = 9
+        self.midi.ensure_unique_channels()
+        self.midi._bump()
+        self.refresh_track_combo()
+        self.editor.update()
 
-        if ok and new_name:
-            self.midi.push_undo()
-            track.name = new_name
-            self.refresh_track_combo()
+        if program != old_program and self._global_audio.output_device != "internal":
+            audio = self._global_audio
+            if audio._open_midi_out():
+                channel = 9 if is_drum else track.channel
+                audio._midi_out.program_change(program, channel)
+                audio._midi_out.note_off(64, channel)
+                audio._midi_out.note_on(64, 96, channel)
+                QTimer.singleShot(500, lambda d=audio._midi_out, c=channel: d.note_off(64, c))
 
     def change_return_to_start(self, checked):
         self.editor.return_to_start_on_stop = checked
@@ -2600,6 +2644,8 @@ class MainWindow(QMainWindow):
                 for t, text in getattr(self.midi, "markers", [])
             ],
             "midi_beat_phase": getattr(self.midi, "beat_phase", 0.0),
+            "midi_pitch_bends": [tuple(point) for point in getattr(self.midi, "pitch_bends", [])],
+            "midi_pitch_bend_line_hidden": bool(getattr(self.midi, "pitch_bend_line_hidden", False)),
             "audio_offset": self._global_audio.offset,
             "audio_volume": self._global_audio.volume,
             "audio_file": self._global_audio.file_path,
@@ -2641,6 +2687,8 @@ class MainWindow(QMainWindow):
             project["midi_tracks"].append({
                 "name": track.name,
                 "channel": track.channel,
+                "program": int(getattr(track, "program", 0)),
+                "is_drum": bool(getattr(track, "is_drum", False)),
                 "notes": [
                     note_dict(note)
                     for note in track.notes
@@ -2670,7 +2718,10 @@ class MainWindow(QMainWindow):
                 len(track.pedals)
                 for track in self.midi.tracks
             ),
+            tuple((track.channel, getattr(track, "program", 0), getattr(track, "is_drum", False)) for track in self.midi.tracks),
             tuple(self.midi.tempos),
+            tuple(tuple(point) for point in getattr(self.midi, "pitch_bends", [])),
+            bool(getattr(self.midi, "pitch_bend_line_hidden", False)),
             len(self.midi.time_signatures),
             float(getattr(self.midi, "beat_phase", 0.0)),
             self._global_audio.offset,
@@ -2859,6 +2910,8 @@ class MainWindow(QMainWindow):
                                     "Invalid project file format: root content is not a JSON object."))
 
             new_midi = MidiData()
+            new_midi.pitch_bends = [(float(point[0]), float(point[1]), float(point[2]) if len(point) > 2 else 60.0) for point in project.get("midi_pitch_bends", []) if isinstance(point, (list, tuple)) and len(point) >= 2]
+            new_midi.pitch_bend_line_hidden = bool(project.get("midi_pitch_bend_line_hidden", False))
             new_midi.play_all_tracks = self.play_all_tracks_button.isChecked()
             new_midi.tracks.clear()
             raw_tempos = project.get("midi_tempos", [(0.0, 120.0)])
@@ -2895,6 +2948,8 @@ class MainWindow(QMainWindow):
                     continue
                 track = new_midi.add_track(name=track_data.get("name"))
                 track.channel = int(track_data.get("channel", len(new_midi.tracks) - 1))
+                track.program = max(0, min(127, int(track_data.get("program", 0))))
+                track.is_drum = bool(track_data.get("is_drum", track.channel == 9))
                 track.audio_file = track_data.get("audio_file", "") or ""
                 track.audio_params = dict(
                     track_data.get("audio_params", {}) or {}
@@ -3097,31 +3152,23 @@ class MainWindow(QMainWindow):
 
 
     def undo(self):
-        before_audio_state = self._current_audio_history_state()
+        audio_state = [(t.audio_file, dict(t.audio_params or {})) for t in self.midi.tracks]
         if not self.midi.undo():
             return
-
-        restored_audio_state = getattr(self.midi, "extra_state", {}).get("audio_history_state")
-        if restored_audio_state != before_audio_state:
-            self._restore_audio_history_state(restored_audio_state)
-            
+        for track, (audio_file, audio_params) in zip(self.midi.tracks, audio_state):
+            track.audio_file, track.audio_params = audio_file, audio_params
         if "audio_offset" in getattr(self.midi, "extra_state", {}):
             self.audio.offset = self.midi.extra_state["audio_offset"]
-
         self.after_edit()
 
     def redo(self):
-        before_audio_state = self._current_audio_history_state()
+        audio_state = [(t.audio_file, dict(t.audio_params or {})) for t in self.midi.tracks]
         if not self.midi.redo():
             return
-
-        restored_audio_state = getattr(self.midi, "extra_state", {}).get("audio_history_state")
-        if restored_audio_state != before_audio_state:
-            self._restore_audio_history_state(restored_audio_state)
-            
+        for track, (audio_file, audio_params) in zip(self.midi.tracks, audio_state):
+            track.audio_file, track.audio_params = audio_file, audio_params
         if "audio_offset" in getattr(self.midi, "extra_state", {}):
             self.audio.offset = self.midi.extra_state["audio_offset"]
-
         self.after_edit()
 
     def after_edit(self):
@@ -3134,72 +3181,6 @@ class MainWindow(QMainWindow):
         self.editor.update_timeline()
 
         self.editor.update()
-
-    def _current_audio_history_state(self):
-        tracks = []
-        for index, track in enumerate(self.midi.tracks):
-            ta = self.track_audio.get(index)
-            tracks.append({
-                "file": (ta.file_path if ta and ta.file_path else track.audio_file) or "",
-                "params": self._collect_audio_params(ta) if ta else dict(track.audio_params or {}),
-            })
-        return {
-            "global": {
-                "file": self._global_audio.file_path or "",
-                "params": self._collect_audio_params(self._global_audio),
-            },
-            "tracks": tracks,
-        }
-
-    def _store_audio_history_state(self):
-        if not hasattr(self.midi, "extra_state"):
-            self.midi.extra_state = {}
-        self.midi.extra_state["audio_history_state"] = self._current_audio_history_state()
-
-    def _restore_audio_history_state(self, state):
-        state = state or {"global": {"file": "", "params": {}}, "tracks": []}
-        self.audio.stop()
-        for ta in self.track_audio.values():
-            ta.clear()
-            ta.close()
-        self.track_audio.clear()
-        self.audio = self._global_audio
-        self.editor.set_audio(self._global_audio)
-
-        global_state = state.get("global", {})
-        global_file = global_state.get("file", "")
-        if global_file and os.path.isfile(global_file):
-            self._load_audio_into(
-                self._global_audio, global_file,
-                tr("元に戻す", "Undo"),
-                restore_params=global_state.get("params", {}),
-                allow_tempo_apply=False,
-            )
-        else:
-            self._global_audio.clear()
-            self.editor.clear_audio()
-
-        track_states = state.get("tracks", [])
-        for index, track in enumerate(self.midi.tracks):
-            saved = track_states[index] if index < len(track_states) else {}
-            track.audio_file = saved.get("file", "") or ""
-            track.audio_params = dict(saved.get("params", {}) or {})
-            path = self._resolve_audio_path(track.audio_file) if track.audio_file else None
-            if path:
-                ta = self._ensure_track_audio(index)
-                self._load_audio_into(
-                    ta, path, tr("元に戻す", "Undo"),
-                    restore_params=track.audio_params,
-                    allow_tempo_apply=False,
-                )
-
-        self.audio = self._current_audio()
-        self.editor.set_audio(self.audio)
-        self._apply_audio_context()
-        self._refresh_timeline_reference()
-        self._sync_audio_ui()
-        self.update_editor()
-
 
     def change_note_length(self, index):
         beats = (
@@ -3375,7 +3356,40 @@ class MainWindow(QMainWindow):
             )
             self.after_edit()
 
-    def clear_audio(self):
+    def clear_audio(self, target_index="current"):
+        """Unload audio only; preserve every MIDI note and project event."""
+        if target_index == "current":
+            target_index = self.track_combo.currentData()
+        self.audio.stop()
+
+        if target_index is None:
+            # The All Tracks selection clears global audio and audio attached to
+            # individual tracks, while leaving track MIDI data untouched.
+            self._global_audio.clear()
+            for track in self.midi.tracks:
+                track.audio_file = ""
+                track.audio_params = {}
+            for ta in self.track_audio.values():
+                ta.clear()
+                ta.close()
+            self.track_audio.clear()
+            self.editor.clear_audio()
+            self.audio = self._global_audio
+        else:
+            if not (0 <= target_index < len(self.midi.tracks)):
+                return
+            track = self.midi.tracks[target_index]
+            track.audio_file = ""
+            track.audio_params = {}
+            ta = self.track_audio.pop(target_index, None)
+            if ta is not None:
+                ta.clear()
+                ta.close()
+            if self._active_track_index() == target_index:
+                self.audio = self._global_audio
+                self.editor.set_audio(self._global_audio)
+                self._apply_audio_context()
+
         self._analysis_token += 1
         self.editor.tempo_analysis = None
         self._analysis_ready = False
@@ -3385,37 +3399,10 @@ class MainWindow(QMainWindow):
         self._pending_tempo_error = None
         self._pending_tap_onsets = None
         self._tempo_analyzed = False
-
-        active_index = self._active_track_index()
-
-        if active_index is not None:
-            if (
-                0 <= active_index <
-                len(self.midi.tracks)
-            ):
-                track = self.midi.tracks[active_index]
-                track.audio_file = ""
-                track.audio_params = {}
-
-            ta = self.track_audio.pop(active_index, None)
-
-            if ta is not None:
-                ta.clear()
-                ta.close()
-
-            self.audio = self._global_audio
-
-            self.editor.set_audio(self._global_audio)
-        else:
-            self.audio.clear()
-
-            self.editor.clear_audio()
-
         self._refresh_timeline_reference()
-
         self._sync_audio_ui()
-
         self.update_title()
+        self.editor.update()
 
     def open_audio(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -3470,8 +3457,6 @@ class MainWindow(QMainWindow):
             else:
                 audio = self._global_audio
 
-            self._store_audio_history_state()
-            self.midi.push_undo()
             audio.a4_freq = a4_freq
 
             self._load_audio_into(
@@ -3488,7 +3473,6 @@ class MainWindow(QMainWindow):
                 )
 
             self._apply_audio_context()
-            self._store_audio_history_state()
             self.update_editor()
             self.editor.set_play_position(0.0)
             self.editor.scroll_x = 0.0

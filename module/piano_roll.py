@@ -4,7 +4,7 @@ import bisect
 import numpy as np
 from PySide6.QtWidgets import QWidget, QDialog, QSpinBox, QDoubleSpinBox, QCheckBox, QLabel, QVBoxLayout, QHBoxLayout, QDialogButtonBox, QMenu, QInputDialog, QLineEdit
 from PySide6.QtCore import Qt, QPointF, QRectF, Signal, QTimer
-from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont, QFontMetrics, QKeySequence, QImage
+from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont, QFontMetrics, QKeySequence, QImage, QPolygonF
 from .spectrum import SpectrumData, TempoCandidateGraph
 from .taptempo import TapTempoEngine, MIN_TAPS_FOR_APPLY
 from .i18n import tr
@@ -125,6 +125,7 @@ class PianoRoll(QWidget):
         self.drag_track_index = 0
 
         self.drag_original_notes = None
+        self.pitch_bend_drag = None
 
 
         self.selected_notes = []
@@ -1379,6 +1380,25 @@ class PianoRoll(QWidget):
         x = event.position().x()
         y = event.position().y()
 
+        if event.button() == Qt.LeftButton and not self.audio.playing:
+            bend_hit = self._pitch_bend_point_at(x, y)
+            if bend_hit is not None:
+                self.midi.push_undo()
+                self.pitch_bend_drag = {
+                    "index": bend_hit,
+                    "start_y": y,
+                    "start_value": float(self.midi.pitch_bends[bend_hit][1]),
+                    "moved": False,
+                }
+                event.accept()
+                return
+            if event.modifiers() & Qt.ControlModifier:
+                note = self.note_at(x, y)
+                if note is not None:
+                    self._add_pitch_bend_point(note, x, y)
+                    event.accept()
+                    return
+
         if event.button() == Qt.LeftButton and (
             event.modifiers() & Qt.AltModifier
         ):
@@ -2451,6 +2471,18 @@ class PianoRoll(QWidget):
             y
         )
 
+        if self.pitch_bend_drag is not None:
+            drag = self.pitch_bend_drag
+            point = list(self.midi.pitch_bends[drag["index"]])
+            step = int(round((drag["start_y"] - y) / max(1, self.note_height)))
+            point[1] = max(-12, min(12, int(round(drag["start_value"])) + step))
+            drag["moved"] = drag["moved"] or point[1] != self.midi.pitch_bends[drag["index"]][1]
+            self.midi.pitch_bends[drag["index"]] = tuple(point)
+            self.midi._bump()
+            self.audio.invalidate_midi_cache()
+            self.update()
+            return
+
         if self.vel_drag is not None:
             self._vel_drag_move(
                 x,
@@ -2689,6 +2721,14 @@ class PianoRoll(QWidget):
         self,
         event
     ):
+        if event.button() == Qt.LeftButton and self.pitch_bend_drag is not None:
+            moved = self.pitch_bend_drag["moved"]
+            self.pitch_bend_drag = None
+            if moved:
+                self.midi.pitch_bend_line_hidden = True
+                self.midi._bump()
+            self.update()
+            return
         if event.button() == Qt.MiddleButton:
             if self.offset_dragging:
                 self.offset_dragging = False
@@ -5275,17 +5315,7 @@ class PianoRoll(QWidget):
                     painter.setPen(outline_pen)
                     painter.setBrush(fill_brush)
 
-                painter.drawRoundedRect(
-                    int(x),
-                    int(y + 2),
-                    max(
-                        1,
-                        int(width)
-                    ),
-                    self.note_height - 4,
-                    3,
-                    3
-                )
+                self._draw_note_pitch_shape(painter, note)
 
             for note_index in range(li0, li1):
                 note = long_notes[note_index]
@@ -5335,17 +5365,7 @@ class PianoRoll(QWidget):
                     painter.setPen(outline_pen)
                     painter.setBrush(fill_brush)
 
-                painter.drawRoundedRect(
-                    int(x),
-                    int(y + 2),
-                    max(
-                        1,
-                        int(width)
-                    ),
-                    self.note_height - 4,
-                    3,
-                    3
-                )
+                self._draw_note_pitch_shape(painter, note)
 
             painter.restore()
 
@@ -5434,6 +5454,92 @@ class PianoRoll(QWidget):
                     3,
                     3
                 )
+
+        bend_points = [] if getattr(self.midi, "pitch_bend_line_hidden", False) else sorted(getattr(self.midi, "pitch_bends", []), key=lambda p: float(p[0]))
+        if bend_points:
+            painter.save()
+            painter.setPen(QPen(QColor(255, 235, 90, 230), 2))
+            painter.setBrush(QColor(255, 235, 90, 240))
+            centers = []
+            for time_sec, bend, anchor_pitch in bend_points:
+                px = self.time_to_x(float(time_sec))
+                py = self.pitch_to_y(max(self.min_pitch, min(self.max_pitch, float(anchor_pitch) + float(bend)))) + self.note_height / 2
+                centers.append(QPointF(px, py))
+            for first, second in zip(centers, centers[1:]):
+                painter.drawLine(first, second)
+            for center in centers:
+                painter.drawEllipse(center, 4, 4)
+            painter.restore()
+
+    def _pitch_bend_point_at(self, x, y):
+        if getattr(self.midi, "pitch_bend_line_hidden", False):
+            return None
+        for index, (time_sec, bend, anchor_pitch) in enumerate(getattr(self.midi, "pitch_bends", [])):
+            px = self.time_to_x(float(time_sec))
+            py = self.pitch_to_y(max(self.min_pitch, min(self.max_pitch, float(anchor_pitch) + float(bend)))) + self.note_height / 2
+            if abs(px - x) <= 8 and abs(py - y) <= 8:
+                return index
+        return None
+
+    def _draw_note_pitch_shape(self, painter, note):
+        start = float(note.start)
+        end = start + float(note.duration)
+        times = [start]
+        times.extend(
+            float(point[0])
+            for point in getattr(self.midi, "pitch_bends", [])
+            if start < float(point[0]) < end
+        )
+        times.append(end)
+        times = sorted(set(times))
+        if len(times) > 256:
+            stride = math.ceil((len(times) - 2) / 254)
+            times = [times[0], *times[1:-1:stride], times[-1]]
+        upper = []
+        lower = []
+        for at_time in times:
+            pitch = max(0.0, min(127.0, float(note.pitch) + self._pitch_bend_value_at(at_time)))
+            y = self.pitch_to_y(pitch)
+            x = self.time_to_x(at_time)
+            upper.append(QPointF(x, y + 2))
+            lower.append(QPointF(x, y + self.note_height - 2))
+        painter.drawPolygon(QPolygonF(upper + list(reversed(lower))))
+
+    def _pitch_bend_value_at(self, time_sec):
+        points = sorted(getattr(self.midi, "pitch_bends", []), key=lambda p: float(p[0]))
+        if not points:
+            return 0.0
+        if time_sec <= float(points[0][0]):
+            return float(points[0][1])
+        for left, right in zip(points, points[1:]):
+            t0, v0 = float(left[0]), float(left[1])
+            t1, v1 = float(right[0]), float(right[1])
+            if t0 <= time_sec <= t1:
+                if t1 <= t0:
+                    return v1
+                ratio = (time_sec - t0) / (t1 - t0)
+                return v0 + ratio * (v1 - v0)
+        return float(points[-1][1])
+
+    def _add_pitch_bend_point(self, note, x, y):
+        time_sec = self.snap_time(self.x_to_time(x), grid=self.note_length, mode="round")
+        time_sec = max(note.start, min(note.start + note.duration, time_sec))
+        current_value = int(round(self._pitch_bend_value_at(time_sec)))
+        self.midi.push_undo()
+        points = list(getattr(self.midi, "pitch_bends", []))
+        for boundary in (note.start, note.start + note.duration):
+            if not any(abs(float(p[0]) - boundary) < 1e-7 for p in points):
+                points.append((boundary, int(round(self._pitch_bend_value_at(boundary))), note.pitch))
+        points = [p for p in points if abs(float(p[0]) - time_sec) >= 1e-7]
+        points.append((time_sec, current_value, note.pitch))
+        points.sort(key=lambda p: float(p[0]))
+        self.midi.pitch_bends = points
+        self.midi.pitch_bend_line_hidden = False
+        self.midi._bump()
+        self.audio.invalidate_midi_cache()
+        index = next(i for i, p in enumerate(points) if abs(float(p[0]) - time_sec) < 1e-7 and float(p[2]) == float(note.pitch))
+        self.pitch_bend_drag = {"index": index, "start_y": y, "start_value": current_value, "moved": False}
+        self.update()
 
     def draw_lyrics(self, painter):
         """ノーツに設定された歌詞をノートの左上に描画する。"""

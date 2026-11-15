@@ -2,6 +2,7 @@ import threading
 import time
 import bisect
 import weakref
+import math
 import os
 import shutil
 import subprocess
@@ -172,7 +173,19 @@ class AudioData:
             self._midi_out = device
             self._midi_out_name = self.output_device
             self._send_tuning_to_midi_out()
+            self._send_track_programs_to_midi_out()
             return True
+
+    def _send_track_programs_to_midi_out(self, track_index=None):
+        device = self._midi_out
+        if device is None or self.midi is None:
+            return
+        tracks = self.midi.tracks
+        if track_index is not None:
+            tracks = tracks[track_index:track_index + 1] if 0 <= track_index < len(tracks) else []
+        for track in tracks:
+            channel = 9 if getattr(track, "is_drum", False) else int(track.channel) & 0x0F
+            device.program_change(getattr(track, "program", 0), channel)
 
     def _close_midi_out(self):
         with self._midi_lock:
@@ -763,6 +776,41 @@ class AudioData:
             else:
                 tracks = self.midi.tracks
 
+            bend_channels = {
+                int(getattr(note, "channel", track.channel)) & 0x0F
+                for track in tracks for note in track.notes
+                if channel_filter is None or (int(getattr(note, "channel", track.channel)) & 0x0F) == channel_filter
+            }
+            bends = sorted(getattr(self.midi, "pitch_bends", []), key=lambda p: float(p[0]))
+            if bends and bend_channels:
+                def bend_value_at(t):
+                    if t <= float(bends[0][0]):
+                        return float(bends[0][1])
+                    for left, right in zip(bends, bends[1:]):
+                        t0, v0 = float(left[0]), float(left[1])
+                        t1, v1 = float(right[0]), float(right[1])
+                        if t0 <= t <= t1:
+                            f = 0.0 if t1 <= t0 else (t - t0) / (t1 - t0)
+                            return v0 + f * (v1 - v0)
+                    return float(bends[-1][1])
+
+                for ch in bend_channels:
+                    initial = int(round(max(-12.0, min(12.0, bend_value_at(start_position))) / 12.0 * 8192))
+                    events.append((0.0, "bend", initial, 0, ch))
+                    for i, point in enumerate(bends):
+                        t0, v0 = float(point[0]), float(point[1])
+                        t1, v1 = (float(bends[i + 1][0]), float(bends[i + 1][1])) if i + 1 < len(bends) else (t0, v0)
+                        if t1 < start_position or t0 > total_time:
+                            continue
+                        steps = max(1, int(math.ceil(max(0.0, t1 - t0) / 0.02)))
+                        for step in range(steps + 1):
+                            t = t0 + (t1 - t0) * step / steps
+                            if t <= start_position or t > total_time:
+                                continue
+                            val = v0 + (v1 - v0) * (step / steps)
+                            raw = int(round(max(-12.0, min(12.0, val)) / 12.0 * 8192))
+                            events.append((t - start_position, "bend", raw, 0, ch))
+
             pedals = []
             for track in tracks:
                 if channel_filter is not None and track.channel != channel_filter:
@@ -808,6 +856,8 @@ class AudioData:
             kind = ev[1]
             if kind == "off":
                 priority = 0
+            elif kind == "bend":
+                priority = 0
             elif kind == "on":
                 priority = 1
             elif kind == "pedal" and not ev[2]:
@@ -842,6 +892,13 @@ class AudioData:
         for ch in range(16):
             try:
                 device.control_change(101, 0, ch)
+                device.control_change(100, 0, ch)
+                device.control_change(6, 12, ch)
+                device.control_change(38, 0, ch)
+                device.control_change(101, 127, ch)
+                device.control_change(100, 127, ch)
+
+                device.control_change(101, 0, ch)
                 device.control_change(100, 2, ch)  # RPN 00 02 is Channel Coarse Tuning
                 device.control_change(6, coarse_val, ch)
                 
@@ -865,6 +922,10 @@ class AudioData:
         try:
             channel_filter = None
             self._send_tuning_to_midi_out()
+            if self.midi is not None and self._midi_out is not None:
+                for track in self.midi.tracks:
+                    channel = 9 if getattr(track, "is_drum", False) else int(track.channel) & 0x0F
+                    self._midi_out.program_change(getattr(track, "program", 0), channel)
             sounding = set()
 
             song_base = start_position
@@ -969,6 +1030,9 @@ class AudioData:
                             if not self.midi_muted:
                                 device.note_on(pitch, velocity, channel)
                                 sounding.add((pitch, channel))
+                        elif kind == "bend":
+                            if not self.midi_muted:
+                                device.pitchwheel(pitch, channel)
                         elif kind == "pedal":
                             if not self.midi_muted:
                                 device.control_change(64, 127 if pitch else 0, channel)
@@ -989,6 +1053,8 @@ class AudioData:
             if self._midi_out is not None:
                 try:
                     self._midi_out.all_notes_off()
+                    for channel in range(16):
+                        self._midi_out.pitchwheel(0, channel)
                 except Exception:
                     pass
 
@@ -1058,6 +1124,37 @@ class AudioData:
             # fallback for external calls if any
             iterable = []
 
+        render_bends = sorted(getattr(self.midi, "pitch_bends", []), key=lambda p: float(p[0])) if self.midi is not None else []
+
+        def render_bend_value(at_time):
+            if not render_bends:
+                return 0.0
+            if at_time <= float(render_bends[0][0]):
+                return float(render_bends[0][1])
+            for left, right in zip(render_bends, render_bends[1:]):
+                t0, v0 = float(left[0]), float(left[1])
+                t1, v1 = float(right[0]), float(right[1])
+                if t0 <= at_time <= t1:
+                    f = 0.0 if t1 <= t0 else (at_time - t0) / (t1 - t0)
+                    return v0 + (v1 - v0) * f
+            return float(render_bends[-1][1]) if render_bends else 0.0
+
+        def bend_phase_cycles(base_frequency, from_time, to_time):
+            if to_time <= from_time:
+                return 0.0
+            boundaries = [from_time]
+            boundaries.extend(float(point[0]) for point in render_bends if from_time < float(point[0]) < to_time)
+            boundaries.append(to_time)
+            cycles = 0.0
+            for left_time, right_time in zip(boundaries, boundaries[1:]):
+                duration = right_time - left_time
+                v0, v1 = render_bend_value(left_time), render_bend_value(right_time)
+                if abs(v1 - v0) < 1e-9:
+                    cycles += base_frequency * duration * (2.0 ** (v0 / 12.0))
+                else:
+                    cycles += base_frequency * duration * 12.0 / ((v1 - v0) * math.log(2.0)) * (2.0 ** (v1 / 12.0) - 2.0 ** (v0 / 12.0))
+            return cycles
+
         attack_length = max(
             1,
             int(sample_rate * 0.001)
@@ -1100,8 +1197,19 @@ class AudioData:
             if not use_midi_out:
                 count = finish - begin
                 note_relative_start = max(0.0, start_time + begin / sample_rate - note_start)
-                np.add(t[:count], note_relative_start, out=phase_buf[:count])
-                phase_buf[:count] *= 2.0 * np.pi * frequency
+                if render_bends:
+                    sample_times = start_time + (begin + np.arange(count, dtype=np.float32)) / sample_rate
+                    bend_times = np.asarray([float(point[0]) for point in render_bends], dtype=np.float32)
+                    bend_values = np.asarray([float(point[1]) for point in render_bends], dtype=np.float32)
+                    semitones = np.interp(sample_times, bend_times, bend_values)
+                    instantaneous_frequency = frequency * np.power(2.0, semitones / 12.0)
+                    phase_at_first_sample = 2.0 * np.pi * bend_phase_cycles(frequency, note_start, float(sample_times[0]))
+                    phase_buf[0] = phase_at_first_sample
+                    if count > 1:
+                        phase_buf[1:count] = phase_at_first_sample + np.cumsum(instantaneous_frequency[:-1], dtype=np.float32) * (2.0 * np.pi / sample_rate)
+                else:
+                    np.add(t[:count], note_relative_start, out=phase_buf[:count])
+                    phase_buf[:count] *= 2.0 * np.pi * frequency
 
                 np.sin(
                     phase_buf[:count],
@@ -1205,7 +1313,8 @@ class AudioData:
         track_index = self._preview_target.get("track_index", 0)
         channel = 0
         if self.midi is not None and 0 <= track_index < len(self.midi.tracks):
-            channel = self.midi.tracks[track_index].channel
+            track = self.midi.tracks[track_index]
+            channel = 9 if getattr(track, "is_drum", False) else track.channel
         if (
             self.preview_pitch is None or
             time.perf_counter() >= self.preview_until
@@ -1239,6 +1348,7 @@ class AudioData:
                     pass
 
             try:
+                self._send_track_programs_to_midi_out(track_index)
                 self._midi_out.note_on(
                     pitch,
                     100,
@@ -1419,8 +1529,10 @@ class AudioData:
 
                 if pitch is not None:
                     track_index = self._preview_target.get("track_index", 0)
-                    channel = self.midi.tracks[track_index].channel if self.midi is not None and track_index < len(self.midi.tracks) else 0
+                    track = self.midi.tracks[track_index] if self.midi is not None and track_index < len(self.midi.tracks) else None
+                    channel = (9 if getattr(track, "is_drum", False) else track.channel) if track is not None else 0
                     try:
+                        self._send_track_programs_to_midi_out(track_index)
                         device.note_on(pitch, 100, channel)
                     except Exception:
                         pass
